@@ -43,6 +43,15 @@ dropped-one-norm bound is rigorous but far above 1 at 20 steps; the
 20-step θ_h = 0.6 value is not converged at 10⁻⁵, and finer thresholds
 run out of 15 GB.
 
+**Release.** Version 0.1.1 is committed (`Release 0.1.1`, CI green), but
+pushing the tag `v0.1.1` was refused by the session's git proxy (HTTP
+403), so it is not on PyPI yet, and the website was left unchanged until
+it is. To finish: push the tag (`git tag v0.1.1 4ba5149 && git push
+origin v0.1.1`), then add the Pauli propagation result to qevedo.com.
+(The first CI run of the feature commit failed on macOS and Windows only
+because pip preferred the published 0.1.0 wheel over the local build of
+the same version; the version bump fixed it.)
+
 **Next.**
 1. A more compact string store (sorted arrays or packed open addressing
    instead of hash maps of full strings) to reach converged 20-step
