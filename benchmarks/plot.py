@@ -31,6 +31,8 @@ plt.rcParams.update({
 })
 
 COLORS = {
+    "pauli-prop": "#6a4c93",
+    "pauli-prop, propagation only": "#b8a1d9",
     "qvd": "#d1495b",
     "qvd, 1 thread": "#f4a4ae",
     "qsim": "#00798c",
@@ -238,9 +240,49 @@ def nearclifford():
     save(fig, "nearclifford.svg")
 
 
+def pauliprop():
+    rows = read("pauliprop.csv")
+    cases = []
+    times = defaultdict(dict)
+    for r in rows:
+        case = (int(r["steps"]), float(r["theta_h"]), float(r["min_abs_coefficient"]))
+        if case not in cases:
+            cases.append(case)
+        if r["simulator"] == "qvd":
+            name = "qvd" if r["threads"] != "1" else "qvd, 1 thread"
+        else:
+            name = "pauli-prop" if r["part"] == "total" else "pauli-prop, propagation only"
+        times[name][case] = float(r["seconds"])
+    threads = next(r["threads"] for r in rows if r["simulator"] == "qvd" and r["threads"] != "1")
+    series = ["qvd", "qvd, 1 thread", "pauli-prop", "pauli-prop, propagation only"]
+    labels = {
+        "qvd": f"qvd, {threads} threads",
+        "qvd, 1 thread": "qvd, 1 thread",
+        "pauli-prop": "IBM pauli-prop, total",
+        "pauli-prop, propagation only": "IBM pauli-prop, propagation only",
+    }
+    width = 0.2
+    fig, ax = plt.subplots(figsize=(10, 4.4))
+    for i, name in enumerate(series):
+        xs = [c + (i - 1.5) * width for c in range(len(cases))]
+        ts = [times[name][case] for case in cases]
+        bars = ax.bar(xs, ts, width, color=COLORS[name], label=labels[name])
+        if name == "qvd":
+            ax.bar_label(bars, labels=[f"{t:g}" for t in ts], fontsize=8, padding=2)
+    ax.set_yscale("log")
+    ax.set_ylabel("seconds (log scale)")
+    ax.set_xticks(range(len(cases)))
+    ax.set_xticklabels([f"{s} steps, θh = {t:g}\nthreshold {a:g}" for s, t, a in cases])
+    ax.set_title("<Z62> of IBM's 127-qubit kicked Ising circuit by Pauli propagation")
+    ax.legend(frameon=False, ncols=2, loc="upper left", fontsize=9)
+    ax.set_ylim(top=max(max(v.values()) for v in times.values()) * 20)
+    save(fig, "pauliprop.svg")
+
+
 if __name__ == "__main__":
     statevector()
     nearclifford()
+    pauliprop()
     mps()
     stabilizer()
     stabilizer_steps()

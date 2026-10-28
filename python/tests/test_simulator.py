@@ -4,7 +4,7 @@ import random
 
 import pytest
 
-from qevedo.simulator import Circuit, choose_backend, run, statevector
+from qevedo.simulator import Circuit, choose_backend, expectation, run, statevector
 
 
 def probabilities(circuit):
@@ -182,3 +182,77 @@ def test_against_qiskit():
             # their global phase, so compare up to a global phase.
             overlap = abs(sum(x.conjugate() * y for x, y in zip(got, expected)))
             assert overlap == pytest.approx(1.0, abs=1e-9), (seed, text[:200])
+
+
+def dense_expectation(state, label):
+    """<ψ|P|ψ> for a dense label (qubit 0 on the right) by direct sums."""
+    n = len(label)
+    total = 0.0
+    for index, amplitude in enumerate(state):
+        flipped, phase = index, 1.0 + 0j
+        for q, p in enumerate(reversed(label)):
+            bit = (index >> q) & 1
+            if p in "XY":
+                flipped ^= 1 << q
+            if p == "Z" and bit:
+                phase = -phase
+            if p == "Y":
+                phase *= 1j if bit == 0 else -1j
+        # P|index> = phase |flipped>, so <ψ|P|ψ> sums conj(ψ[flipped]) phase ψ[index].
+        total += (state[flipped].conjugate() * phase * amplitude).real
+    return total
+
+
+def test_expectation_matches_the_state_vector():
+    rng = random.Random(7)
+    gates = [("h", 1, 0), ("s", 1, 0), ("t", 1, 0), ("rx", 1, 1), ("ry", 1, 1), ("rz", 1, 1),
+             ("cx", 2, 0), ("cz", 2, 0), ("cp", 2, 1), ("rzz", 2, 1), ("ccx", 3, 0)]
+    for _ in range(10):
+        n = rng.randint(3, 6)
+        circuit = Circuit(n)
+        for _ in range(25):
+            name, arity, params = rng.choice(gates)
+            circuit.gate(name, rng.sample(range(n), arity), [rng.uniform(-3, 3) for _ in range(params)])
+        state = statevector(circuit)
+        labels = ["".join(rng.choice("IXYZ") for _ in range(n)) for _ in range(3)]
+        observable = {label: rng.uniform(-1, 1) for label in labels}
+        result = expectation(circuit, observable, min_abs_coefficient=0)
+        want = sum(c * dense_expectation(state, label) for label, c in observable.items())
+        assert result.value == pytest.approx(want, abs=1e-9)
+        assert result.truncated_one_norm == 0
+
+
+def test_expectation_at_utility_scale():
+    # Two steps of the 127-qubit kicked Ising circuit is beyond a state
+    # vector; at θ_h = 0 every <Z_q> is 1, and the sparse label form works.
+    edges = [(q, q + 1) for q in range(126)]
+    circuit = Circuit(127)
+    for _ in range(2):
+        for q in range(127):
+            circuit.gate("rx", [q], [0.3])
+        for a, b in edges:
+            circuit.gate("rzz", [a, b], [-math.pi / 2])
+    result = expectation(circuit, "Z62", min_abs_coefficient=1e-8)
+    assert -1 <= result.value <= 1 and result.peak_terms > 1
+    assert expectation(circuit, [("Z62", 0.5), ("Z62", 0.5)]).value == pytest.approx(
+        expectation(circuit, "Z62").value
+    )
+    with pytest.raises(ValueError):
+        expectation(Circuit(2).h(0).measure_all(), "Z0")
+    with pytest.raises(ValueError):
+        expectation(Circuit(2), {"Z0": 1j})
+
+
+def test_expectation_against_qiskit():
+    pytest.importorskip("qiskit")
+    from qiskit.circuit.random import random_circuit
+    from qiskit.quantum_info import SparsePauliOp, Statevector
+    from qiskit import qasm2, transpile
+
+    basis = ["h", "s", "sdg", "t", "tdg", "sx", "rx", "ry", "rz", "u", "cx", "cz", "cp", "rzz", "swap"]
+    for seed in range(5):
+        qc = transpile(random_circuit(5, 6, seed=seed), basis_gates=basis, optimization_level=0)
+        operator = SparsePauliOp(["XXZIY", "ZZIII", "IYXZI"], [0.5, -1.0, 0.25])
+        want = Statevector(qc).expectation_value(operator).real
+        got = expectation(qasm2.dumps(qc), operator, min_abs_coefficient=0)
+        assert got.value == pytest.approx(want, abs=1e-9)

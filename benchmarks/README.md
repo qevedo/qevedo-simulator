@@ -12,12 +12,15 @@ benchmarks/
 │   ├── stabilizer.csv          Clifford circuits: qvd vs Stim vs Qiskit Aer
 │   ├── mps.csv                 matrix product states: qvd vs Qiskit Aer vs quimb
 │   ├── nearclifford.csv        Clifford+T circuits: qvd vs Qiskit Aer
+│   ├── pauliprop.csv           expectation values: qvd vs IBM's pauli-prop
 │   └── stabilizer_steps.csv    how each optimisation changed the d=101 time
 ├── charts/                     SVGs drawn from results/ by plot.py
 ├── compare.py                  times Qiskit Aer and qsim on a QASM file
 ├── compare_stim.py             times Stim and Qiskit Aer's stabilizer method
 ├── compare_mps.py              times Qiskit Aer's and quimb's MPS simulators
 ├── compare_nearclifford.py     times Qiskit Aer's methods on Clifford+T circuits
+├── compare_pauliprop.py        times IBM's pauli-prop on an expectation value
+├── bench_pauliprop.py          runs qvd and pauli-prop on every case -> pauliprop.csv
 └── plot.py                     results/*.csv -> charts/*.svg
 ```
 
@@ -93,6 +96,23 @@ three; every Aer method ran in its own process, stopped at 600 s. Aer's
 there is no state vector past 30 qubits. A virtual machine shared the
 machine during these runs.
 
+## Expectation values (Pauli propagation)
+
+![Pauli propagation benchmark](charts/pauliprop.svg)
+
+`<Z62>` of IBM's 127-qubit kicked Ising circuit (`library::kicked_ising`
+on `library::eagle_heavy_hex`), the same coefficient threshold in both.
+Measured on a different machine from the rest of this page: a cloud
+virtual machine with 4 vCPUs of an Intel Xeon at 2.80 GHz and 15 GB
+(`pauliprop_machine` in `machine.json`). qvd ran on 4 threads and on 1
+(best of 3); pauli-prop 0.2.1 ran once per case in its own process, on
+one thread (its CPU time matched its wall time), with `max_terms` well
+above what each case needs so that only the threshold truncates. Its
+"propagation only" time is its Rust propagation through the rotations;
+its total adds moving the Cliffords out in Python and evolving the final
+strings through them in Qiskit. Both return the same value, the same
+number of strings and the same dropped one-norm in every case.
+
 ## Reproducing
 
 ```sh
@@ -116,6 +136,10 @@ cargo run --release --example nearclifford -- 100 30 24 1000 --qasm /tmp/n.qasm
 .bench-venv/bin/python benchmarks/compare_nearclifford.py /tmp/n.qasm --shots 1000 \
     --methods matrix_product_state,extended_stabilizer
 
+# Pauli propagation: every case, qvd and pauli-prop (pip install pauli-prop).
+cargo build --release --example pauliprop
+.bench-venv/bin/python benchmarks/bench_pauliprop.py
+
 # After editing results/*.csv:
 .bench-venv/bin/python benchmarks/plot.py
 ```
@@ -127,4 +151,6 @@ off); `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads. The
 `random <qubits> <depth> <shots>`; `QVD_THREADS=pcores|all|<n>` selects the
 threads (P-cores by default). The `mps` example takes
 `<random|grid|qft|ghz> <qubits | ROWSxCOLS> <depth> <max bond> [shots]`, and
-the `nearclifford` example `<qubits> <depth> <T count> [shots] [--backend nc|sv|mps]`.
+the `nearclifford` example `<qubits> <depth> <T count> [shots] [--backend nc|sv|mps]`,
+and the `pauliprop` example `<steps> <θ_h> <observable> [threshold] [max terms]`
+(`QVD_THREADS=<n>` sets its threads).

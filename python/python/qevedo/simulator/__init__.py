@@ -2,7 +2,8 @@
 
 Build circuits with :class:`Circuit` (or read OpenQASM 2/3 with
 :meth:`Circuit.from_qasm`), then sample them with :func:`run` or get the
-final state with :func:`statevector`. ``run`` chooses the method
+final state with :func:`statevector`, or compute expectation values of
+circuits far too large for a state vector with :func:`expectation`. ``run`` chooses the method
 automatically: the stabilizer backend for Clifford circuits, the
 near-Clifford backend when few non-Clifford gates are ever active, the
 state vector when it fits in memory, and a matrix product state otherwise.
@@ -42,15 +43,27 @@ _check_cpu()
 
 from qevedo.simulator._native import (  # noqa: E402
     Circuit,
+    ExpectationResult,
     RunResult,
     __version__,
     choose_backend as _choose_backend,
+    expectation as _expectation,
     run as _run,
     statevector_bytes as _statevector_bytes,
     uses_avx2,
 )
 
-__all__ = ["Circuit", "RunResult", "run", "statevector", "choose_backend", "uses_avx2", "__version__"]
+__all__ = [
+    "Circuit",
+    "ExpectationResult",
+    "RunResult",
+    "run",
+    "statevector",
+    "expectation",
+    "choose_backend",
+    "uses_avx2",
+    "__version__",
+]
 
 BACKENDS = ("auto", "statevector", "stabilizer", "mps", "near_clifford")
 
@@ -116,6 +129,57 @@ def statevector(circuit: Circuit | str, *, threads: int | str | None = None):
         values = struct.unpack(f"<{len(raw) // 8}d", raw)
         return [complex(values[i], values[i + 1]) for i in range(0, len(values), 2)]
     return np.frombuffer(raw, dtype="<c16").copy()
+
+
+def _terms(observable) -> list[tuple[str, float]]:
+    if isinstance(observable, str):
+        items = [(observable, 1.0)]
+    elif isinstance(observable, dict):
+        items = list(observable.items())
+    elif hasattr(observable, "to_list"):  # Qiskit's SparsePauliOp
+        items = observable.to_list()
+    else:
+        items = list(observable)
+    terms = []
+    for label, coefficient in items:
+        coefficient = complex(coefficient)
+        if abs(coefficient.imag) > 1e-12 * max(1.0, abs(coefficient)):
+            raise ValueError("observables must be Hermitian: real coefficients only")
+        terms.append((str(label), coefficient.real))
+    return terms
+
+
+def expectation(
+    circuit: Circuit | str,
+    observable,
+    *,
+    min_abs_coefficient: float = 1e-5,
+    max_terms: int | None = None,
+    threads: int | str | None = None,
+) -> ExpectationResult:
+    """``<0...0| U† O U |0...0>`` for a unitary circuit ``U`` by Pauli
+    propagation, for any number of qubits up to 1024.
+
+    The observable ``O`` is a Pauli string, a ``{string: coefficient}``
+    dict, a list of ``(string, coefficient)`` pairs, or a Qiskit
+    ``SparsePauliOp``. Strings are sparse (``"Z62"``, ``"X0 Y3 Z7"``) or
+    dense labels with qubit 0 on the right (``"IXZ"``, Qiskit's order).
+
+    The observable is propagated backwards through the circuit; Clifford
+    gates are absorbed into a frame for free, and every other rotation can
+    double the number of Pauli strings. Strings whose coefficient falls
+    below ``min_abs_coefficient`` are dropped (0 keeps all: exact, and
+    exponential in the number of rotations), and at most ``max_terms`` of
+    the largest are kept. The result's ``truncated_one_norm``, the sum of
+    the dropped magnitudes, bounds the error of ``value``.
+    """
+    return _expectation(
+        _circuit(circuit),
+        _terms(observable),
+        min_abs_coefficient=min_abs_coefficient,
+        max_terms=max_terms,
+        threads=threads,
+    )
 
 
 def choose_backend(

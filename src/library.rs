@@ -274,3 +274,63 @@ pub fn random_clifford_t(n: usize, depth: usize, t_count: usize, seed: u64) -> C
     }
     c
 }
+
+/// The couplers of IBM's 127-qubit Eagle processors (heavy-hex lattice,
+/// 144 edges, as in ibm_kyiv), with Qiskit's qubit numbering. Seven rows
+/// of 14 or 15 qubits, joined by four bridge qubits between neighbouring
+/// rows; rows and bridges are numbered in reading order.
+pub fn eagle_heavy_hex() -> Vec<(usize, usize)> {
+    // (first column, length) of each row; bridges sit at columns 0, 4, 8, 12
+    // below even rows and 2, 6, 10, 14 below odd ones.
+    let rows = [
+        (0, 14),
+        (0, 15),
+        (0, 15),
+        (0, 15),
+        (0, 15),
+        (0, 15),
+        (1, 14),
+    ];
+    let mut edges = Vec::new();
+    let mut starts = Vec::new();
+    let mut next = 0;
+    for (r, &(first, len)) in rows.iter().enumerate() {
+        starts.push(next);
+        edges.extend((next..next + len - 1).map(|q| (q, q + 1)));
+        next += len;
+        if r + 1 < rows.len() {
+            // Bridges follow the row; their lower ends are numbered with the
+            // next row, whose first column is always 0 or 1.
+            let below_start = next + 4;
+            let below_first = rows[r + 1].0;
+            for (b, col) in (0..4).map(|b| (b, 4 * b + 2 * (r % 2))) {
+                let bridge = next + b;
+                edges.push((starts[r] + col - first, bridge));
+                edges.push((bridge, below_start + col - below_first));
+            }
+            next += 4;
+        }
+    }
+    edges
+}
+
+/// The kicked transverse-field Ising circuit of IBM's utility experiment
+/// (Kim et al., Nature 618, 500 (2023)): `steps` Trotter steps, each
+/// `RX(θ_h)` on every qubit, then `RZZ(-π/2)` on every edge.
+pub fn kicked_ising(
+    num_qubits: usize,
+    edges: &[(usize, usize)],
+    steps: usize,
+    theta_h: f64,
+) -> Circuit {
+    let mut c = Circuit::new(num_qubits);
+    for _ in 0..steps {
+        for q in 0..num_qubits {
+            c.rx(theta_h, q);
+        }
+        for &(a, b) in edges {
+            c.gate(Gate::RZZ(-std::f64::consts::FRAC_PI_2), &[a, b]);
+        }
+    }
+    c
+}

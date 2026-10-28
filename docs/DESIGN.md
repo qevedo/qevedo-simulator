@@ -502,7 +502,105 @@ number of active qubits (at most one per T gate), not in the qubit count,
 so 200 qubits with 20 T gates (peak 20) cost less than 100 qubits with 24
 (peak 23).
 
-## 10. Not done yet
+## 10. Pauli propagation (`pauliprop/`)
+
+Many questions about a circuit are expectation values, `<0|U† O U|0>` for
+an observable `O`, and need no state at all. Propagating `O` backwards
+through the circuit (the Heisenberg picture) keeps it a sum of Pauli
+strings with real coefficients. A Clifford gate maps each string to one
+string. A Pauli rotation `exp(-iφ/2 Q)` leaves strings that commute with
+`Q` alone and splits each one that anticommutes:
+`P -> cos φ P + sin φ (iQP)`. Dropping strings with small coefficients
+keeps the sum sparse: the "sparse Pauli dynamics" with which Begušić,
+Gray and Chan reproduced IBM's 127-qubit kicked Ising experiment
+(arXiv:2308.05077, Science Advances 2024). Rudolph et al. review the
+method (arXiv:2505.21606), and Angrisani et al. prove its mean squared
+error small for random circuits (arXiv:2409.01706).
+
+**Strings.** A string is two bit words per 64 qubits, `P(x, z) = i^{x·z}
+X^x Z^z`, so `Y = iXZ` and every string is Hermitian. A product's phase
+comes from four popcounts. The word count is a const generic, compiled for
+1, 2, 4, 8 and 16 words (up to 1024 qubits).
+
+**Clifford frame.** Walking the circuit from its end, Cliffords never
+touch the observable. They are collected in a frame `K`, stored as the
+`2n` images `K X_q K†` and `K Z_q K†`. A rotation met behind them moves
+past them, `K R_Q(θ) = R_{KQK†}(θ) K`, so only the rotation, with its
+Pauli rewritten, is applied to the sum. At the end each surviving string
+contributes `c_P <0|K† P K|0>`: zero if `P` anticommutes with a stabilizer
+`K Z_q K†`, otherwise ±1, the sign of the product of the stabilizers that
+make up `P`. In the kicked Ising circuits the `RZZ(-π/2)` gates (144 of
+every 271) are Clifford and cost nothing. IBM's pauli-prop moves its
+Cliffords the same way, in Python, before propagating.
+
+**Quarter turns.** Rotations by multiples of π/2 that appear only after
+lowering (the halves of `CP(π)`, say) go to the frame too. Splitting other
+angles into `θ - π/2` and a Clifford `π/2`, as Clifford perturbation
+theory does (arXiv:2306.04797), was tried and removed: for a coefficient
+threshold it changes nothing, since it yields the same strings with
+cosine and sine swapped. pauli-prop, which does not split, kept exactly
+the same strings on every benchmark below.
+
+**Sharded sum.** The strings live in 64 hash maps, chosen by an
+independent hash of the string. A rotation runs in two parallel passes:
+every shard scales its anticommuting strings by `cos φ` in place and
+emits each partner `iQP` with `sin φ c` to the partner's shard, then every
+shard adds what it received. `P -> QP` is a bijection, so each string
+receives at most one contribution per rotation: no locks, and a
+cancellation is final. Strings below the threshold are dropped one
+rotation late, on their next visit, so a string scaled by `cos φ` can
+still receive its partner's contribution first. Below 16,384 strings the
+shards run on one thread. An optional cap keeps only the largest strings
+after every rotation.
+
+**Error.** The dropped part of the observable keeps its operator norm
+through the rest of the circuit, so the error is at most the sum of the
+dropped magnitudes, reported as `truncated_one_norm`. The bound is
+rigorous but loose: at the thresholds below it is far above 1 for 20
+steps. On 12-qubit chains, where the exact value is known, the error is
+far below the bound and a fine threshold converges to it (tested). Convergence is the practical check: at
+5 steps and θ_h = 1.2, thresholds 10⁻⁵, 10⁻⁶ and 10⁻⁷ give 0.048586,
+0.048771 and 0.048772. At 20 steps and θ_h = 0.6, 10⁻⁴ gives 0.464 and
+10⁻⁵ gives 0.570 with 42 million strings at the peak, so neither is
+converged. At θ_h = 1.0, 20 steps at 10⁻⁵ ran out of this machine's
+15 GB (at 1.2 and 1.4 it had not finished after 120 s, and 10⁻⁶ ran out
+of memory at all three).
+
+**Correctness** (`tests/pauliprop.rs`, plus unit tests of the algebra):
+- exact propagation (threshold 0) against the dense reference over every
+  supported gate, with angles at and near multiples of π/2, and sums of up
+  to three strings;
+- Clifford circuits, which must need no rotations at all;
+- qubits spread over 70 to 1024 positions, for the multi-word strings;
+- error within the reported bound for coefficient and term-count
+  truncation, and convergence at a fine threshold, on 12-qubit kicked
+  Ising chains;
+- the 127-qubit circuit at its Clifford points (θ_h = 0, π/2, π) against
+  the near-Clifford backend's exact expectation values, and the Eagle
+  lattice's shape;
+- in Python, against Qiskit's `Statevector.expectation_value`.
+
+**Against IBM's pauli-prop 0.2.1** (Rust-accelerated, single-threaded;
+`benchmarks/bench_pauliprop.py`). `<Z62>` of the 127-qubit kicked Ising
+circuit, with the same threshold in both, on a 4-vCPU Xeon virtual
+machine (not the i9). Both return the same value, the same number of
+strings and the same dropped one-norm in every case.
+
+| Steps | θ_h | Threshold | Strings | qvd, 4 threads | qvd, 1 thread | pauli-prop, total | pauli-prop, propagation only |
+|---|---|---|---|---|---|---|---|
+| 20 | 0.2 | 10⁻⁵ | 25,041 | **0.25 s** | 0.25 s | 5.7 s | 1.2 s |
+| 20 | 0.4 | 10⁻⁵ | 1,162,230 | **9.6 s** | 27.4 s | 191 s | 152 s |
+| 20 | 0.6 | 10⁻⁴ | 587,226 | **6.1 s** | 18.0 s | 89 s | 73 s |
+| 5 | 1.2 | 10⁻⁶ | 2,047,259 | **0.74 s** | 2.3 s | 87 s | 7.6 s |
+| 5 | 1.4 | 10⁻⁶ | 469,018 | **0.23 s** | 0.65 s | 13.3 s | 1.6 s |
+
+On one thread qvd's whole run is 2.4–5.5× faster than pauli-prop's Rust
+propagation alone; with four threads and end to end, 14.6–117×. pauli-prop's
+total adds its Clifford preprocessing and evolving the final strings
+through that Clifford in Qiskit, which dominates when millions of strings
+remain (79 of its 87 s at 5 steps, θ_h = 1.2).
+
+## 11. Not done yet
 
 - **Calibration.** Fusion width (4) and region size (2^14 blocks) are fixed
   defaults chosen from the measurements above. A per-machine calibration
@@ -510,9 +608,16 @@ so 200 qubits with 20 T gates (peak 20) cost less than 100 qubits with 24
   them.
 - **Smarter stage planning.** The lookahead is greedy; Atlas finds a
   minimal number of stages with an ILP.
-- **Other backends.** Pauli propagation for expectation values, and a
-  cost-based selector calibrated on this machine (the current one compares
-  rough work estimates), are the roadmap in the README.
+- **Other backends.** A cost-based selector calibrated on this machine
+  (the current one compares rough work estimates) is on the roadmap in the
+  README.
+- **Pauli propagation.** Truncation by Pauli weight, and Pauli noise
+  channels (which damp anticommuting strings and make truncation provably
+  accurate, Angrisani et al., arXiv:2501.13101), are not implemented. Two-
+  and more-qubit `Unitary` gates are rejected; a KAK decomposition would
+  lower two-qubit ones to rotations. Memory, not time, limits the 20-step
+  utility circuits at fine thresholds; a more compact store than hash maps
+  of full strings would reach further.
 - **Near-Clifford.** Gates after mid-circuit measurements multiply with the
   branches of the measurement tree. Pauli frames could carry them too (as
   in Clifft) when the gates are Clifford. Rotations whose angle is a

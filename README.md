@@ -25,7 +25,11 @@ the same circuits. Circuits with few non-Clifford gates run on a
 near-Clifford backend (a Clifford frame around a small dense state, after
 Clifft): a 200-qubit Clifford+T circuit with 20 T gates samples 1000 shots in
 0.11 s, where every Qiskit Aer method either takes over 10 minutes or
-does not support it.
+does not support it. Expectation values of circuits far beyond any state
+vector come from Pauli propagation: `<Z62>` of IBM's 127-qubit, 20-step
+kicked Ising "utility" circuit in 0.25–9.6 s, with the same result as IBM's
+pauli-prop and 14.6–117× faster than it end to end (5.0–15.7× faster than
+its propagation step alone, on 4 threads).
 
 ## How it works
 
@@ -177,6 +181,44 @@ uses it to choose this backend when it beats the state vector by a wide
 margin. Final measurements are sampled with per-shot Pauli frames, so 1000
 shots cost little more than one.
 
+### Expectation values (Pauli propagation)
+
+![Pauli propagation benchmark: qvd vs IBM pauli-prop](benchmarks/charts/pauliprop.svg)
+
+`<Z62>` of the kicked Ising circuit of IBM's utility experiment (Kim et
+al., Nature 618, 500 (2023)): 127 qubits on the Eagle heavy-hex lattice,
+each step `RX(θ_h)` on every qubit and `RZZ(-π/2)` on all 144 couplers.
+Strings with coefficients below the threshold are dropped, the same in
+both. Measured on a 4-vCPU Xeon virtual machine, not the i9 above.
+
+| Steps | θ_h | Threshold | Value | Strings | qvd, 4 threads | qvd, 1 thread | IBM pauli-prop 0.2.1, total | pauli-prop, propagation only |
+|---|---|---|---|---|---|---|---|---|
+| 20 | 0.2 | 10⁻⁵ | 0.978495 | 25,041 | **0.25 s** | 0.25 s | 5.7 s | 1.2 s |
+| 20 | 0.4 | 10⁻⁵ | 0.834608 | 1,162,230 | **9.6 s** | 27.4 s | 191 s | 152 s |
+| 20 | 0.6 | 10⁻⁴ | 0.463959 | 587,226 | **6.1 s** | 18.0 s | 89 s | 73 s |
+| 5 | 1.2 | 10⁻⁶ | 0.048770 | 2,047,259 | **0.74 s** | 2.3 s | 87 s | 7.6 s |
+| 5 | 1.4 | 10⁻⁶ | 0.004617 | 469,018 | **0.23 s** | 0.65 s | 13.3 s | 1.6 s |
+
+Both return the same value, keep the same strings and drop the same
+total coefficient in every case. pauli-prop runs on one thread; its total
+includes moving the Clifford gates out in Python and evolving the final
+strings through them in Qiskit, which dominates when millions of strings
+remain.
+
+The observable, a sum of Pauli strings, is propagated backwards through
+the circuit; each non-Clifford rotation can split a string in two, and
+strings with small coefficients are dropped (the sparse Pauli dynamics of
+Begušić, Gray and Chan, arXiv:2308.05077). Cliffords collect in a frame
+and cost nothing, and the strings live in 64 hash maps that a rotation
+updates in two parallel passes. The sum of the dropped coefficients
+bounds the error and is reported, but it is loose: at 20 steps it is
+above 1 in the table, and the practical check is convergence as the
+threshold falls (10⁻⁵, 10⁻⁶ and 10⁻⁷ give 0.048586, 0.048771 and 0.048772
+at 5 steps, θ_h = 1.2). At 20 steps and θ_h = 0.6 the value is not
+converged (0.464 at 10⁻⁴, 0.570 at 10⁻⁵ with 42 million strings), and
+finer thresholds or larger θ_h run out of this machine's 15 GB. Details
+are in [docs/DESIGN.md](docs/DESIGN.md#10-pauli-propagation-pauliprop).
+
 ## How many qubits?
 
 A full state of *n* qubits holds 2ⁿ amplitudes: 8 bytes each in single
@@ -196,8 +238,10 @@ one machine are possible only for circuits with structure: Clifford
 circuits (qvd's stabilizer backend handles 20,000 qubits in seconds),
 Clifford circuits with a few non-Clifford gates (qvd's near-Clifford
 backend: 200 qubits with 20 T gates in a tenth of a second),
-low-entanglement circuits (qvd's MPS backend: 100 qubits and more), or a few
-amplitudes rather than the whole state.
+low-entanglement circuits (qvd's MPS backend: 100 qubits and more),
+expectation values of observables that stay sparse in the Pauli basis
+(qvd's Pauli propagation: 127 qubits and up to 1024), or a few amplitudes
+rather than the whole state.
 
 ## Usage
 
@@ -208,13 +252,20 @@ pip install qevedo-simulator        # imports as qevedo.simulator
 ```
 
 ```python
-from qevedo.simulator import Circuit, run, statevector
+from qevedo.simulator import Circuit, expectation, run, statevector
 
 result = run(Circuit(2).h(0).cx(0, 1).measure_all(), shots=1000)
 print(result.counts, result.backend)   # backend chosen automatically
 
 run(open("circuit.qasm").read(), shots=1000)   # OpenQASM 2 or 3 text
 state = statevector(Circuit(3).h(0).cx(0, 1))  # NumPy array if installed
+
+# <0|U† O U|0> by Pauli propagation, any size up to 1024 qubits.
+ghz = Circuit(100).h(0)
+for q in range(99):
+    ghz.cx(q, q + 1)
+e = expectation(ghz, {"Z0 Z99": 1.0, "X0": 0.5}, min_abs_coefficient=1e-5)
+print(e.value, e.truncated_one_norm)   # value and a bound on its error
 ```
 
 See [python/README.md](python/README.md). The bindings are a PyO3 module
@@ -275,6 +326,20 @@ let samples = qvd::stabilizer::sample(&circuit, 100_000, Some(1)).unwrap();
 let first_shot_bit_0 = samples.get(0, 0);
 ```
 
+Expectation values come from `qvd::pauliprop::expectation`, for unitary
+circuits of any gates except two- and more-qubit `Unitary` matrices:
+
+```rust
+use qvd::library::{eagle_heavy_hex, kicked_ising};
+use qvd::pauliprop::{PropagationOptions, expectation, parse_pauli};
+
+let circuit = kicked_ising(127, &eagle_heavy_hex(), 20, 0.4);
+let observable = vec![(1.0, parse_pauli("Z62").unwrap())];
+let options = PropagationOptions { min_abs_coefficient: 1e-5, max_terms: None };
+let result = expectation(&circuit, &observable, &options).unwrap();
+println!("{} ± {}", result.value, result.truncated_one_norm);
+```
+
 Threads run on rayon's global pool by default. To choose cores explicitly
 (the stabilizer backend is fastest on P-cores only):
 
@@ -312,6 +377,7 @@ cargo run --release --example shots -- 28 1000000
 cargo run --release --example stabilizer -- surface 101 101 10000 --qasm /tmp/s.qasm
 cargo run --release --example mps -- random 64 20 256 1000 --qasm /tmp/m.qasm
 cargo run --release --example nearclifford -- 100 30 24 1000 --qasm /tmp/n.qasm
+cargo run --release --example pauliprop -- 20 0.4 Z62 1e-5 --qasm /tmp/k.qasm
 
 # Compare with Qiskit Aer and qsim on the same circuit:
 python3 -m venv .bench-venv
@@ -326,6 +392,10 @@ python3 -m venv .bench-venv
 
 # Clifford+T circuits against Qiskit Aer (extended stabilizer, MPS, state vector):
 .bench-venv/bin/python benchmarks/compare_nearclifford.py /tmp/n.qasm --shots 1000
+
+# Expectation values against IBM's pauli-prop (pip install pauli-prop):
+.bench-venv/bin/python benchmarks/compare_pauliprop.py /tmp/k.qasm Z62 --atol 1e-5
+.bench-venv/bin/python benchmarks/bench_pauliprop.py     # every case -> results/pauliprop.csv
 
 # Redraw benchmarks/charts/ from benchmarks/results/*.csv:
 .bench-venv/bin/python benchmarks/plot.py
@@ -343,8 +413,9 @@ off). `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads.
    state vector does not fit).
 3. ~~Near-Clifford backend~~ (done; chosen automatically when it is much
    cheaper than the state vector).
-4. Pauli propagation for expectation values, and a backend selector
-   calibrated by benchmarks on this machine.
+4. ~~Pauli propagation for expectation values~~ (done: `qvd::pauliprop`,
+   and `expectation` in Python); a backend selector calibrated by
+   benchmarks on this machine is still to do.
 5. ~~OpenQASM input and Python bindings~~ (done: `qvd::qasm`, and the
    `qevedo-simulator` package in `python/`, imported as `qevedo.simulator`).
 6. Noise: Pauli noise channels fit the stabilizer and near-Clifford frame

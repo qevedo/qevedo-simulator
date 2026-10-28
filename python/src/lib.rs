@@ -322,6 +322,70 @@ impl PyRunResult {
     }
 }
 
+/// An expectation value from Pauli propagation, with its error bound.
+#[pyclass(name = "ExpectationResult", module = "qevedo.simulator", frozen, get_all)]
+struct PyExpectationResult {
+    /// The (approximate) expectation value.
+    value: f64,
+    /// Sum of the magnitudes of the dropped coefficients: a rigorous bound
+    /// on the error of `value`; 0 when nothing was dropped.
+    truncated_one_norm: f64,
+    /// Non-Clifford Pauli rotations propagated through.
+    rotations: usize,
+    /// The most Pauli strings held at once.
+    peak_terms: usize,
+    /// Pauli strings left at the end.
+    final_terms: usize,
+    seconds: f64,
+}
+
+#[pymethods]
+impl PyExpectationResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "ExpectationResult(value={}, truncated_one_norm={:e}, peak_terms={})",
+            self.value, self.truncated_one_norm, self.peak_terms
+        )
+    }
+}
+
+/// `<0|U† O U|0>` by Pauli propagation; see `qevedo.simulator.expectation`.
+/// `terms` are `(Pauli string, coefficient)` pairs.
+#[pyfunction]
+#[pyo3(signature = (circuit, terms, min_abs_coefficient = 1e-5, max_terms = None, threads = None))]
+fn expectation(
+    py: Python<'_>,
+    circuit: &PyCircuit,
+    terms: Vec<(String, f64)>,
+    min_abs_coefficient: f64,
+    max_terms: Option<usize>,
+    threads: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyExpectationResult> {
+    use qvd::pauliprop::{Observable, PropagationOptions, parse_pauli};
+    let observable: Observable = terms
+        .iter()
+        .map(|(label, c)| Ok((*c, parse_pauli(label).map_err(value_error)?)))
+        .collect::<PyResult<_>>()?;
+    let options = PropagationOptions {
+        min_abs_coefficient,
+        max_terms,
+    };
+    let placement = parse_threads(threads)?;
+    let circuit = circuit.inner.clone();
+    let result = compute(py, placement, move || {
+        qvd::pauliprop::expectation(&circuit, &observable, &options)
+    })
+    .map_err(value_error)?;
+    Ok(PyExpectationResult {
+        value: result.value,
+        truncated_one_norm: result.truncated_one_norm,
+        rotations: result.rotations,
+        peak_terms: result.peak_terms,
+        final_terms: result.final_terms,
+        seconds: result.seconds,
+    })
+}
+
 fn backend_name(backend: Backend) -> &'static str {
     match backend {
         Backend::Auto => "auto",
@@ -506,6 +570,8 @@ fn uses_avx2() -> bool {
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCircuit>()?;
     m.add_class::<PyRunResult>()?;
+    m.add_class::<PyExpectationResult>()?;
+    m.add_function(wrap_pyfunction!(expectation, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(statevector_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(choose_backend, m)?)?;

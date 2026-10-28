@@ -15,6 +15,7 @@ mod measure;
 pub mod memory;
 pub mod mps;
 pub mod nearclifford;
+pub mod pauliprop;
 pub mod qasm;
 pub mod reference;
 pub mod simd;
