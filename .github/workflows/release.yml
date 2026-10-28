@@ -1,7 +1,11 @@
 name: Release
 
-# Publish qevedo-simulator to PyPI when a version tag (vX.Y.Z) is pushed. The
-# tag must match the version in python/Cargo.toml and CI must pass.
+# Publish qevedo-simulator to PyPI when the version in python/Cargo.toml
+# changes on master and has no tag yet, or when a version tag (vX.Y.Z) is
+# pushed; a pushed tag must match the version. CI must pass. Releasing from
+# master needs no tag push (the daily improvement routine cannot push tags):
+# the GitHub release creates the tag vX.Y.Z at the released commit, and a tag
+# made with the workflow's own token starts no further workflow run.
 #
 # Publishing uses PyPI trusted publishing: on pypi.org, add a (pending)
 # trusted publisher for project "qevedo-simulator", owner "qevedo",
@@ -12,23 +16,43 @@ name: Release
 # leak into wheels, so every build sets RUSTFLAGS.
 on:
   push:
+    branches: [master]
+    # Path filters apply to the branch only: every version tag runs.
+    paths: [python/Cargo.toml, .github/workflows/release.yml]
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yml
-
   check:
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - name: Check the tag against the version
+      - name: Decide whether to release, and which tag
+        id: version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' python/Cargo.toml | head -1)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match python/Cargo.toml version $version"
-            exit 1
+          tag="v$version"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$tag" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match python/Cargo.toml version $version"
+              exit 1
+            fi
+            release=true
+          elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "$tag is already released: nothing to do"
+            release=false
+          else
+            release=true
           fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    uses: ./.github/workflows/ci.yml
 
   wheels:
     needs: [ci, check]
@@ -97,7 +121,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   github-release:
-    needs: publish
+    needs: [check, publish]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -106,7 +130,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create the GitHub release
+      - name: Create the GitHub release (and the tag, if it is new)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          TAG: ${{ needs.check.outputs.tag }}
+        run: gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
