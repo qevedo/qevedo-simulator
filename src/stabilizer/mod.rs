@@ -8,17 +8,23 @@
 //! reference run on the tableau, then every other shot is the reference
 //! plus a Pauli "frame" propagated through the circuit, 64 shots per
 //! machine word.
+//!
+//! Pauli noise channels ([`Noise`]) cost nothing in the reference run: a
+//! Pauli error only multiplies a shot's frame, so each shot draws its
+//! errors independently and adds them to its frame. Errors are rare, so
+//! the sampler draws the gaps between them (geometrically distributed)
+//! instead of one random number per qubit and shot, as Stim does.
 
 mod tableau;
 
 use std::f64::consts::FRAC_PI_2;
 use std::time::Instant;
 
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rand_pcg::Pcg64;
 use rayon::prelude::*;
 
-use crate::circuit::{Circuit, Gate, Instruction};
+use crate::circuit::{Circuit, Gate, Instruction, Noise};
 use crate::simulator::{RunResult, counts_from_keys};
 
 pub use tableau::{Layout, PauliString, Tableau};
@@ -186,6 +192,9 @@ impl Tableau {
                     tableau.reset(*qubit, rng);
                 }
                 Instruction::Barrier { .. } => {}
+                Instruction::Noise { .. } => {
+                    return Err("a single tableau cannot follow noise; use sample".into());
+                }
             }
         }
         layer.flush(&mut tableau);
@@ -252,6 +261,81 @@ impl Frames {
     fn swap_tables(&mut self, q: usize) {
         let r = self.qubit(q);
         self.x[r.clone()].swap_with_slice(&mut self.z[r]);
+    }
+
+    /// Add the errors of a noise channel on `targets` (qubits, or pairs of
+    /// qubits for `Depolarize2`) to every shot's frame.
+    ///
+    /// In each word, the 64 shots of every target form one run of
+    /// `64 * targets` Bernoulli trials ("does this shot get an error on
+    /// this target?"). The gap before the next error is geometric, so
+    /// with error rate `p` a word costs about `1 + 64 * targets * p` random
+    /// draws rather than `64 * targets`. Which error it is comes from a
+    /// second draw.
+    // Kept out of line: inlined into the step loop it slowed noiseless
+    // circuits down by a few percent.
+    #[inline(never)]
+    fn noise(&mut self, channel: Noise, targets: &[usize]) {
+        let p = channel.probability();
+        if p <= 0.0 {
+            return;
+        }
+        let arity = channel.arity();
+        let trials = targets.len() / arity * 64;
+        // ln(1 - p); -inf when p = 1, where every trial is an error.
+        let log_miss = (-p).ln_1p();
+        let words = self.words;
+        for w in 0..words {
+            let rng = &mut self.rngs[w];
+            let mut next = 0usize;
+            loop {
+                if log_miss > f64::NEG_INFINITY {
+                    // P(gap >= k) = (1 - p)^k for u uniform in (0, 1].
+                    let u = 1.0 - rng.random::<f64>();
+                    next = next.saturating_add((u.ln() / log_miss) as usize);
+                }
+                if next >= trials {
+                    break;
+                }
+                let (target, bit) = (next / 64, 1u64 << (next % 64));
+                match channel {
+                    Noise::Pauli1 { px, py, .. } => {
+                        // X, Y or Z in proportion to px, py, pz.
+                        let r = rng.random::<f64>() * p;
+                        let (x, z) = if r < px {
+                            (true, false)
+                        } else if r < px + py {
+                            (true, true)
+                        } else {
+                            (false, true)
+                        };
+                        let i = targets[target] * words + w;
+                        if x {
+                            self.x[i] ^= bit;
+                        }
+                        if z {
+                            self.z[i] ^= bit;
+                        }
+                    }
+                    Noise::Depolarize2(_) => {
+                        // One of the 15 non-identity Paulis on the pair:
+                        // the bits of k are (x_a, z_a, x_b, z_b).
+                        let k: u32 = rng.random_range(1..16);
+                        for (half, q) in targets[2 * target..2 * target + 2].iter().enumerate() {
+                            let i = q * words + w;
+                            let bits = k >> (2 * half);
+                            if bits & 1 == 1 {
+                                self.x[i] ^= bit;
+                            }
+                            if bits & 2 == 2 {
+                                self.z[i] ^= bit;
+                            }
+                        }
+                    }
+                }
+                next += 1;
+            }
+        }
     }
 
     fn apply(&mut self, op: Clifford) {
@@ -385,6 +469,79 @@ enum Step {
     Reset {
         qubit: usize,
     },
+    /// The noise channel `noises[index]`. Kept out of line so that every
+    /// step stays as small as before (the steps are walked in cache-sized
+    /// segments, and doubling their size slowed noiseless circuits down).
+    Noise {
+        index: usize,
+    },
+}
+
+/// A noise channel step: the channel and its targets,
+/// `noise_targets[start..end]`.
+struct NoiseStep {
+    channel: Noise,
+    start: usize,
+    end: usize,
+}
+
+/// Noise channels waiting to be added to the steps. A Pauli channel
+/// commutes with every gate on other qubits and with every other Pauli
+/// channel, so channels are held back until a gate, measurement or reset
+/// touches one of their qubits. That gathers the per-gate channels of a
+/// layer (`CX a b; DEPOLARIZE2 a b; CX c d; DEPOLARIZE2 c d; ...`) into one
+/// step, whose gaps between errors then span the whole layer.
+struct PendingNoise {
+    groups: Vec<(Noise, Vec<usize>)>,
+    noisy: Vec<bool>,
+}
+
+impl PendingNoise {
+    fn add(&mut self, channel: Noise, qubits: &[usize]) {
+        match self.groups.iter_mut().find(|(c, _)| *c == channel) {
+            Some((_, targets)) => targets.extend_from_slice(qubits),
+            None => self.groups.push((channel, qubits.to_vec())),
+        }
+        for &q in qubits {
+            self.noisy[q] = true;
+        }
+    }
+
+    /// Emit the held channels if any of `qubits` has one.
+    fn before(
+        &mut self,
+        qubits: impl IntoIterator<Item = usize>,
+        steps: &mut Vec<Step>,
+        noises: &mut Vec<NoiseStep>,
+        targets: &mut Vec<usize>,
+    ) {
+        if !self.groups.is_empty() && qubits.into_iter().any(|q| self.noisy[q]) {
+            self.flush(steps, noises, targets);
+        }
+    }
+
+    fn flush(
+        &mut self,
+        steps: &mut Vec<Step>,
+        noises: &mut Vec<NoiseStep>,
+        targets: &mut Vec<usize>,
+    ) {
+        for (channel, qubits) in self.groups.drain(..) {
+            for &q in &qubits {
+                self.noisy[q] = false;
+            }
+            let start = targets.len();
+            targets.extend(qubits);
+            steps.push(Step::Noise {
+                index: noises.len(),
+            });
+            noises.push(NoiseStep {
+                channel,
+                start,
+                end: targets.len(),
+            });
+        }
+    }
 }
 
 /// A pointer that may be shared between threads writing disjoint ranges.
@@ -405,8 +562,8 @@ impl Shared {
 /// One reference shot runs on the tableau; the others are Pauli frames
 /// relative to it, 64 shots per word. The frames are split into blocks of
 /// a few words that run through the whole circuit independently, in
-/// parallel and in cache. Fails if the circuit contains a non-Clifford
-/// gate.
+/// parallel and in cache. Noise channels are sampled independently in every
+/// shot. Fails if the circuit contains a non-Clifford gate.
 pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samples, String> {
     let mut rng = match seed {
         Some(seed) => Pcg64::seed_from_u64(seed),
@@ -417,17 +574,25 @@ pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samp
     let mut tableau = Tableau::new(n);
     let mut layer = Layer::new(n);
     let mut steps = Vec::with_capacity(circuit.instructions.len());
+    let mut noises = Vec::new();
+    let mut noise_targets = Vec::new();
+    let mut pending = PendingNoise {
+        groups: Vec::new(),
+        noisy: vec![false; n],
+    };
     for instruction in &circuit.instructions {
         match instruction {
             Instruction::Gate { gate, qubits } => {
                 for op in
                     lower(gate, qubits).ok_or_else(|| format!("{gate:?} is not a Clifford gate"))?
                 {
+                    pending.before(op.qubits(), &mut steps, &mut noises, &mut noise_targets);
                     layer.push(op, &mut tableau);
                     steps.push(Step::Gate(op));
                 }
             }
             Instruction::Measure { qubit, clbit } => {
+                pending.before([*qubit], &mut steps, &mut noises, &mut noise_targets);
                 layer.flush(&mut tableau);
                 let reference = tableau.measure(*qubit, &mut rng);
                 steps.push(Step::Measure {
@@ -437,14 +602,18 @@ pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samp
                 });
             }
             Instruction::Reset { qubit } => {
+                pending.before([*qubit], &mut steps, &mut noises, &mut noise_targets);
                 layer.flush(&mut tableau);
                 tableau.reset(*qubit, &mut rng);
                 steps.push(Step::Reset { qubit: *qubit });
             }
             Instruction::Barrier { .. } => {}
+            // The reference shot is noiseless; errors live in the frames.
+            Instruction::Noise { channel, qubits } => pending.add(*channel, qubits),
         }
     }
-    drop((tableau, layer));
+    pending.flush(&mut steps, &mut noises, &mut noise_targets);
+    drop((tableau, layer, pending));
     // Frames, one block per thread, at most 2048 shots each so a block's
     // frames stay in cache. Run inside a pool of performance cores: the
     // blocks synchronise after every segment of steps, so a slow core holds
@@ -489,6 +658,10 @@ pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samp
                         frames.x[r].fill(0);
                         frames.randomize_z(qubit);
                     }
+                    Step::Noise { index } => {
+                        let step = &noises[index];
+                        frames.noise(step.channel, &noise_targets[step.start..step.end]);
+                    }
                 }
             }
         });
@@ -499,6 +672,72 @@ pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samp
         words,
         bits,
     })
+}
+
+/// The circuit in Stim's format, so Stim can sample exactly the same noisy
+/// circuit: gates are lowered to Stim's `H`, `S`, `S_DAG`, Paulis, `CX`,
+/// `CZ` and `SWAP` (dropping global phases), noise channels keep their
+/// Stim names. Stim numbers measurement results in the order they happen,
+/// which are qvd's classical bits when each bit is written once, in
+/// increasing order (as in [`crate::library::surface_code`]). Fails on
+/// non-Clifford gates.
+pub fn to_stim(circuit: &Circuit) -> Result<String, String> {
+    // Consecutive instructions with the same name and arguments share a
+    // line, as in Stim's own circuits; Stim applies a line's targets in
+    // order, so this is the same circuit.
+    let mut out = String::new();
+    let mut line = String::new();
+    let mut emit = |head: String, targets: &mut dyn Iterator<Item = usize>| {
+        if !line.starts_with(&head) || line.as_bytes().get(head.len()) != Some(&b' ') {
+            if !line.is_empty() {
+                out.push_str(&line);
+                out.push('\n');
+            }
+            line = head;
+        }
+        for q in targets {
+            line.push(' ');
+            line.push_str(&q.to_string());
+        }
+    };
+    for instruction in &circuit.instructions {
+        match instruction {
+            Instruction::Gate { gate, qubits } => {
+                for op in
+                    lower(gate, qubits).ok_or_else(|| format!("{gate:?} is not a Clifford gate"))?
+                {
+                    let name = match op {
+                        Clifford::H(_) => "H",
+                        Clifford::S(_) => "S",
+                        Clifford::Sdg(_) => "S_DAG",
+                        Clifford::X(_) => "X",
+                        Clifford::Y(_) => "Y",
+                        Clifford::Z(_) => "Z",
+                        Clifford::CX(..) => "CX",
+                        Clifford::CZ(..) => "CZ",
+                        Clifford::Swap(..) => "SWAP",
+                    };
+                    emit(name.to_string(), &mut op.qubits());
+                }
+            }
+            Instruction::Measure { qubit, .. } => emit("M".into(), &mut std::iter::once(*qubit)),
+            Instruction::Reset { qubit } => emit("R".into(), &mut std::iter::once(*qubit)),
+            Instruction::Barrier { .. } => {}
+            Instruction::Noise { channel, qubits } => {
+                let (name, args) = channel.stim_name();
+                let args: Vec<String> = args.iter().map(|p| format!("{p:?}")).collect();
+                emit(
+                    format!("{name}({})", args.join(", ")),
+                    &mut qubits.iter().copied(),
+                );
+            }
+        }
+    }
+    if !line.is_empty() {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 /// Run a Clifford circuit for `shots` shots and count the outcomes.

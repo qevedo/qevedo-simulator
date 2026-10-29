@@ -3,7 +3,7 @@
 use rand::{RngExt, SeedableRng};
 use rand_pcg::Pcg64;
 
-use crate::circuit::{Circuit, Gate};
+use crate::circuit::{Circuit, Gate, Instruction};
 
 /// GHZ state preparation: H on qubit 0, then a CX chain.
 pub fn ghz(n: usize) -> Circuit {
@@ -220,6 +220,116 @@ pub fn surface_code(d: usize, rounds: usize) -> Circuit {
         clbit += 1;
     }
     c
+}
+
+/// `circuit` with uniform circuit-level depolarizing noise of strength `p`,
+/// the usual model of error-correction threshold studies:
+/// `DEPOLARIZE1(p)` after every one-qubit gate, `DEPOLARIZE2(p)` after
+/// every two-qubit gate, and a bit flip with probability `p` before every
+/// measurement and after every reset. These are Stim's generated circuits'
+/// `after_clifford_depolarization`, `before_measure_flip_probability` and
+/// `after_reset_flip_probability`, all set to `p`; idle qubits get no noise.
+///
+/// As in Stim's circuits, each layer's noise is one instruction: a channel
+/// is held back until a later instruction touches one of its qubits (Pauli
+/// channels commute with gates on other qubits), and a run of measurements
+/// gets its bit flips first, as one instruction.
+pub fn with_depolarizing_noise(circuit: &Circuit, p: f64) -> Circuit {
+    use crate::circuit::Noise;
+    let mut noisy = Circuit::new(circuit.num_qubits);
+    noisy.num_clbits = circuit.num_clbits;
+    /// Noise channels held back, and which qubits they touch.
+    struct Held {
+        pending: Vec<(Noise, Vec<usize>)>,
+        held: Vec<bool>,
+    }
+    impl Held {
+        fn hold(&mut self, channel: Noise, qubits: &[usize]) {
+            match self.pending.iter_mut().find(|(c, _)| *c == channel) {
+                Some((_, targets)) => targets.extend_from_slice(qubits),
+                None => self.pending.push((channel, qubits.to_vec())),
+            }
+            for &q in qubits {
+                self.held[q] = true;
+            }
+        }
+
+        fn flush(&mut self, noisy: &mut Circuit) {
+            for (channel, qubits) in self.pending.drain(..) {
+                for &q in &qubits {
+                    self.held[q] = false;
+                }
+                noisy.noise(channel, &qubits);
+            }
+        }
+    }
+    let mut held = Held {
+        pending: Vec::new(),
+        held: vec![false; circuit.num_qubits],
+    };
+    let flip = Noise::Pauli1 {
+        px: p,
+        py: 0.0,
+        pz: 0.0,
+    };
+    let instructions = &circuit.instructions;
+    let mut i = 0;
+    while i < instructions.len() {
+        let instruction = &instructions[i];
+        if let Instruction::Measure { .. } = instruction {
+            // The bit flips of the whole run of measurements, then the run.
+            let run: Vec<usize> = instructions[i..]
+                .iter()
+                .map_while(|m| match m {
+                    Instruction::Measure { qubit, .. } => Some(*qubit),
+                    _ => None,
+                })
+                .collect();
+            held.hold(flip, &run);
+            held.flush(&mut noisy);
+            noisy
+                .instructions
+                .extend_from_slice(&instructions[i..i + run.len()]);
+            i += run.len();
+            continue;
+        }
+        let touched: Vec<usize> = match instruction {
+            Instruction::Gate { qubits, .. } | Instruction::Barrier { qubits } => qubits.clone(),
+            Instruction::Reset { qubit } => vec![*qubit],
+            Instruction::Noise { qubits, .. } => qubits.clone(),
+            Instruction::Measure { .. } => unreachable!(),
+        };
+        if touched.iter().any(|&q| held.held[q]) {
+            held.flush(&mut noisy);
+        }
+        noisy.instructions.push(instruction.clone());
+        match instruction {
+            Instruction::Gate { qubits, .. } if qubits.len() == 1 => {
+                held.hold(
+                    Noise::Pauli1 {
+                        px: p / 3.0,
+                        py: p / 3.0,
+                        pz: p / 3.0,
+                    },
+                    qubits,
+                );
+            }
+            Instruction::Gate { qubits, .. } if qubits.len() == 2 => {
+                held.hold(Noise::Depolarize2(p), qubits);
+            }
+            Instruction::Gate { gate, .. } => {
+                panic!(
+                    "no depolarizing channel for the {}-qubit {gate:?}",
+                    gate.arity()
+                )
+            }
+            Instruction::Reset { qubit } => held.hold(flip, &[*qubit]),
+            _ => {}
+        }
+        i += 1;
+    }
+    held.flush(&mut noisy);
+    noisy
 }
 
 /// A random Clifford circuit: `depth` layers of random single-qubit

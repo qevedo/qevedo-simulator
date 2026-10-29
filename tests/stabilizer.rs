@@ -8,7 +8,7 @@ use std::f64::consts::FRAC_PI_2;
 
 use qvd::reference;
 use qvd::stabilizer::{self, Layout, PauliString, Tableau};
-use qvd::{Backend, C64, Circuit, Gate, Instruction, Matrix, Options};
+use qvd::{Backend, C64, Circuit, Gate, Instruction, Matrix, Noise, Options};
 use rand::{Rng, RngExt};
 
 /// A random circuit over every gate form the stabilizer backend accepts.
@@ -338,4 +338,333 @@ fn sampling_is_reproducible_across_thread_counts() {
             "classical bit {c}"
         );
     }
+}
+
+/// A random noise channel: one of the Pauli channels or `Depolarize2`,
+/// with probabilities up to 0.4 and sometimes exactly 0 or 1.
+fn random_noise(rng: &mut impl Rng, n: usize) -> (Noise, Vec<usize>) {
+    let mut p = || match rng.random_range(0..8) {
+        0 => 0.0,
+        1 => 1.0,
+        _ => rng.random::<f64>() * 0.4,
+    };
+    let (a, b, c) = (p(), p(), p());
+    let channel = match rng.random_range(0..6) {
+        0 => Noise::Pauli1 {
+            px: a,
+            py: 0.0,
+            pz: 0.0,
+        },
+        1 => Noise::Pauli1 {
+            px: 0.0,
+            py: 0.0,
+            pz: a,
+        },
+        2 => Noise::Pauli1 {
+            px: a / 3.0,
+            py: a / 3.0,
+            pz: a / 3.0,
+        },
+        3 => {
+            let total = (a + b + c).max(1.0);
+            Noise::Pauli1 {
+                px: a / total,
+                py: b / total,
+                pz: c / total,
+            }
+        }
+        _ if n >= 2 => Noise::Depolarize2(a),
+        _ => Noise::Pauli1 {
+            px: 0.0,
+            py: a,
+            pz: 0.0,
+        },
+    };
+    let qubits = common::random_qubits(rng, n, channel.arity());
+    (channel, qubits)
+}
+
+#[test]
+fn noisy_sampling_matches_exact_distribution() {
+    // Random Clifford circuits with noise channels between the gates (and
+    // before measurements and after resets), against the exact
+    // distribution summed over every combination of errors.
+    let mut rng = common::rng(31);
+    for case in 0..40 {
+        let n = 1 + case % 5;
+        let mut circuit = Circuit::new(n);
+        let mut channels = 0;
+        for _ in 0..4 {
+            let part = random_clifford(&mut rng, n, 6);
+            circuit.instructions.extend(part.instructions);
+            // At most one two-qubit channel per gap keeps the exact sum small.
+            let (channel, qubits) = random_noise(&mut rng, n);
+            circuit.noise(channel, &qubits);
+            channels += 1;
+        }
+        if case % 2 == 1 {
+            circuit.measure(0, 0);
+            circuit.reset(n - 1);
+            circuit.x_error(n - 1, 0.25);
+            let more = random_clifford(&mut rng, n, 6);
+            circuit.instructions.extend(more.instructions);
+        }
+        // Several targets in one channel, as Stim writes a layer (two at
+        // most: each target multiplies the exact sum's branches by 4).
+        let all: Vec<usize> = (0..n.min(2)).collect();
+        circuit.noise(
+            Noise::Pauli1 {
+                px: 0.05,
+                py: 0.02,
+                pz: 0.1,
+            },
+            &all,
+        );
+        for q in 0..n {
+            circuit.measure(q, q + 1);
+        }
+        assert!(circuit.has_noise() && channels > 0);
+        let shots = 50_000;
+        let options = Options {
+            backend: Backend::Stabilizer,
+            seed: Some(100 + case as u64),
+            ..Options::default()
+        };
+        let result = qvd::run::<f64>(&circuit, shots, &options).unwrap();
+        let exact = exact_distribution(&circuit);
+        let total: f64 = exact.values().sum();
+        assert!((total - 1.0).abs() < 1e-9, "case {case}: total {total}");
+        for key in result.counts.keys() {
+            assert!(
+                exact.get(key).is_some_and(|&p| p > 1e-12),
+                "case {case}: impossible outcome {key}"
+            );
+        }
+        for (key, &p) in &exact {
+            let observed = *result.counts.get(key).unwrap_or(&0) as f64 / shots as f64;
+            let sigma = (p * (1.0 - p) / shots as f64).sqrt();
+            assert!(
+                (observed - p).abs() <= 5.0 * sigma + 1e-9,
+                "case {case} {key}: observed {observed}, exact {p}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rare_and_certain_errors_have_the_right_rates() {
+    // Many qubits and shots, so that the gaps between errors cross word and
+    // target boundaries: the measured flip rates must match p, including
+    // p = 1 (every shot) and p = 0 (none).
+    let n = 300;
+    let shots = 20_000;
+    for (channel, flip, both) in [
+        (
+            Noise::Pauli1 {
+                px: 1e-3,
+                py: 0.0,
+                pz: 0.0,
+            },
+            1e-3,
+            None,
+        ),
+        (
+            Noise::Pauli1 {
+                px: 0.0,
+                py: 0.05,
+                pz: 0.0,
+            },
+            0.05,
+            None,
+        ),
+        (
+            Noise::Pauli1 {
+                px: 0.0,
+                py: 0.0,
+                pz: 0.3,
+            },
+            0.0,
+            None,
+        ),
+        (
+            Noise::Pauli1 {
+                px: 0.1,
+                py: 0.1,
+                pz: 0.1,
+            },
+            0.2,
+            None,
+        ),
+        (
+            Noise::Pauli1 {
+                px: 1.0,
+                py: 0.0,
+                pz: 0.0,
+            },
+            1.0,
+            None,
+        ),
+        (
+            Noise::Pauli1 {
+                px: 0.0,
+                py: 0.0,
+                pz: 0.0,
+            },
+            0.0,
+            None,
+        ),
+        // Each qubit of a pair flips in 8 of the 15 Paulis, both in 4.
+        (
+            Noise::Depolarize2(0.003),
+            0.003 * 8.0 / 15.0,
+            Some(0.003 * 4.0 / 15.0),
+        ),
+        (
+            Noise::Depolarize2(0.6),
+            0.6 * 8.0 / 15.0,
+            Some(0.6 * 4.0 / 15.0),
+        ),
+    ] {
+        let mut circuit = Circuit::new(n);
+        let qubits: Vec<usize> = (0..n).collect();
+        circuit.noise(channel, &qubits);
+        circuit.measure_all();
+        let samples = stabilizer::sample(&circuit, shots, Some(5)).unwrap();
+        let mut flips = 0usize;
+        let mut pairs = 0usize;
+        for s in 0..shots {
+            for q in 0..n {
+                flips += samples.get(s, q) as usize;
+            }
+            for q in (0..n).step_by(2) {
+                pairs += (samples.get(s, q) && samples.get(s, q + 1)) as usize;
+            }
+        }
+        let check = |count: usize, trials: usize, p: f64, what: &str| {
+            let observed = count as f64 / trials as f64;
+            let sigma = (p * (1.0 - p) / trials as f64).sqrt();
+            assert!(
+                (observed - p).abs() <= 5.0 * sigma + 1e-12,
+                "{channel:?} {what}: observed {observed}, expected {p}"
+            );
+        };
+        check(flips, n * shots, flip, "flips");
+        if let Some(both) = both {
+            check(pairs, n / 2 * shots, both, "both qubits of a pair");
+        }
+    }
+}
+
+#[test]
+fn noisy_sampling_is_reproducible_across_thread_counts() {
+    let circuit = qvd::library::with_depolarizing_noise(&qvd::library::surface_code(9, 3), 0.01);
+    let sample = |threads| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| stabilizer::sample(&circuit, 5000, Some(7)))
+            .unwrap()
+    };
+    let (one, three) = (sample(1), sample(3));
+    for c in 0..circuit.num_clbits {
+        assert_eq!(
+            one.clbit_words(c),
+            three.clbit_words(c),
+            "classical bit {c}"
+        );
+    }
+}
+
+#[test]
+fn noisy_surface_code_detection_events() {
+    // A detector compares a stabilizer with its value in the round before.
+    // Without noise none fires; with noise of strength p, the fraction that
+    // fire grows about linearly in p for small p.
+    let d = 5;
+    let rounds = 6;
+    let ancillas = d * d - 1;
+    let shots = 20_000;
+    let rate = |p: f64| {
+        let circuit =
+            qvd::library::with_depolarizing_noise(&qvd::library::surface_code(d, rounds), p);
+        let samples = stabilizer::sample(&circuit, shots, Some(3)).unwrap();
+        let mut fired = 0usize;
+        for s in 0..shots {
+            for r in 1..rounds {
+                for a in 0..ancillas {
+                    fired += (samples.get(s, r * ancillas + a)
+                        != samples.get(s, (r - 1) * ancillas + a))
+                        as usize;
+                }
+            }
+        }
+        fired as f64 / ((rounds - 1) * ancillas * shots) as f64
+    };
+    assert_eq!(rate(0.0), 0.0);
+    let (low, high) = (rate(0.001), rate(0.004));
+    assert!(low > 0.005 && low < 0.05, "{low}");
+    assert!((high / low - 4.0).abs() < 0.6, "{low} {high}");
+}
+
+#[test]
+fn noise_needs_the_stabilizer_backend() {
+    let mut circuit = Circuit::new(2);
+    circuit.h(0).cx(0, 1).depolarize2(0, 1, 0.1).measure_all();
+    assert!(stabilizer::is_clifford(&circuit));
+    let auto = qvd::run::<f32>(&circuit, 100, &Options::default()).unwrap();
+    assert_eq!(auto.stats.backend, Some(Backend::Stabilizer));
+    for backend in [Backend::StateVector, Backend::Mps, Backend::NearClifford] {
+        let options = Options {
+            backend,
+            ..Options::default()
+        };
+        assert!(
+            qvd::run::<f32>(&circuit, 10, &options).is_err(),
+            "{backend:?}"
+        );
+    }
+    // Not Clifford and noisy: no backend runs it.
+    circuit.t(0);
+    assert!(qvd::run::<f32>(&circuit, 10, &Options::default()).is_err());
+    assert!(circuit.to_qasm().is_err());
+    let mut rng = common::rng(1);
+    assert!(Tableau::from_circuit(&circuit, &mut rng).is_err());
+}
+
+#[test]
+fn stim_export() {
+    let mut circuit = Circuit::new(3);
+    circuit
+        .h(0)
+        .sx(1)
+        .cx(0, 1)
+        .depolarize2(0, 1, 0.01)
+        .depolarize1(2, 0.003)
+        .x_error(2, 0.5)
+        .reset(2)
+        .measure(0, 0)
+        .measure(1, 1);
+    // Consecutive instructions with the same name and arguments share a line.
+    assert_eq!(
+        stabilizer::to_stim(&circuit).unwrap(),
+        "H 0 1\nS 1\nH 1\nCX 0 1\nDEPOLARIZE2(0.01) 0 1\nDEPOLARIZE1(0.003) 2\n\
+         X_ERROR(0.5) 2\nR 2\nM 0 1\n"
+    );
+    // Noise layers: one instruction per channel and layer, exactly where
+    // Stim's generated circuits put them.
+    let mut layer = Circuit::new(4);
+    layer
+        .h(0)
+        .h(1)
+        .cx(0, 2)
+        .cx(1, 3)
+        .reset(0)
+        .measure(2, 0)
+        .measure(3, 1);
+    assert_eq!(
+        stabilizer::to_stim(&qvd::library::with_depolarizing_noise(&layer, 0.001)).unwrap(),
+        "H 0 1\nDEPOLARIZE1(0.001) 0 1\nCX 0 2 1 3\nDEPOLARIZE2(0.001) 0 2 1 3\nR 0\n\
+         X_ERROR(0.001) 0 2 3\nM 2 3\n"
+    );
 }

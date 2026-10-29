@@ -10,10 +10,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use qvd::threads::{Placement, pool};
-use qvd::{Backend, Circuit, Gate, Instruction, Matrix, Options};
+use qvd::{Backend, Circuit, Gate, Instruction, Matrix, Noise, Options};
 
-/// A quantum circuit: gates, measurements, resets and barriers on numbered
-/// qubits and classical bits (qubit 0 is the least significant bit, as in
+/// A quantum circuit: gates, measurements, resets, barriers and Pauli noise
+/// channels on numbered qubits and classical bits (qubit 0 is the least significant bit, as in
 /// Qiskit).
 #[pyclass(name = "Circuit", module = "qevedo.simulator", skip_from_py_object)]
 #[derive(Clone)]
@@ -52,6 +52,21 @@ impl PyCircuit {
             )));
         }
         self.inner.gate(gate, qubits);
+        Ok(())
+    }
+
+    fn push_noise(&mut self, channel: Noise, qubits: &[usize]) -> PyResult<()> {
+        self.check(qubits)?;
+        let probabilities = match channel {
+            Noise::Pauli1 { px, py, pz } => vec![px, py, pz],
+            Noise::Depolarize2(p) => vec![p],
+        };
+        if !probabilities.iter().all(|p| (0.0..=1.0).contains(p)) || channel.probability() > 1.0 {
+            return Err(value_error(
+                "noise probabilities must lie in [0, 1] and sum to at most 1",
+            ));
+        }
+        self.inner.noise(channel, qubits);
         Ok(())
     }
 }
@@ -213,8 +228,102 @@ impl PyCircuit {
         slf
     }
 
+    /// A bit flip (X) on `qubit` with probability `p`.
+    fn x_error(mut slf: PyRefMut<'_, Self>, qubit: usize, p: f64) -> PyResult<PyRefMut<'_, Self>> {
+        slf.push_noise(
+            Noise::Pauli1 {
+                px: p,
+                py: 0.0,
+                pz: 0.0,
+            },
+            &[qubit],
+        )?;
+        Ok(slf)
+    }
+
+    /// A Y error on `qubit` with probability `p`.
+    fn y_error(mut slf: PyRefMut<'_, Self>, qubit: usize, p: f64) -> PyResult<PyRefMut<'_, Self>> {
+        slf.push_noise(
+            Noise::Pauli1 {
+                px: 0.0,
+                py: p,
+                pz: 0.0,
+            },
+            &[qubit],
+        )?;
+        Ok(slf)
+    }
+
+    /// A phase flip (Z) on `qubit` with probability `p`.
+    fn z_error(mut slf: PyRefMut<'_, Self>, qubit: usize, p: f64) -> PyResult<PyRefMut<'_, Self>> {
+        slf.push_noise(
+            Noise::Pauli1 {
+                px: 0.0,
+                py: 0.0,
+                pz: p,
+            },
+            &[qubit],
+        )?;
+        Ok(slf)
+    }
+
+    /// X, Y or Z on `qubit` with probabilities `px`, `py`, `pz`.
+    fn pauli_channel_1(
+        mut slf: PyRefMut<'_, Self>,
+        qubit: usize,
+        px: f64,
+        py: f64,
+        pz: f64,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.push_noise(Noise::Pauli1 { px, py, pz }, &[qubit])?;
+        Ok(slf)
+    }
+
+    /// X, Y or Z on `qubit`, each with probability `p / 3`.
+    fn depolarize1(
+        mut slf: PyRefMut<'_, Self>,
+        qubit: usize,
+        p: f64,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        let q = p / 3.0;
+        slf.push_noise(
+            Noise::Pauli1 {
+                px: q,
+                py: q,
+                pz: q,
+            },
+            &[qubit],
+        )?;
+        Ok(slf)
+    }
+
+    /// Each of the 15 non-identity Paulis on qubits `a` and `b` with
+    /// probability `p / 15`.
+    fn depolarize2(
+        mut slf: PyRefMut<'_, Self>,
+        a: usize,
+        b: usize,
+        p: f64,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.push_noise(Noise::Depolarize2(p), &[a, b])?;
+        Ok(slf)
+    }
+
+    /// Whether the circuit has noise channels (only the stabilizer backend
+    /// runs those).
+    fn has_noise(&self) -> bool {
+        self.inner.has_noise()
+    }
+
+    /// The circuit in Stim's text format (Clifford circuits only), so that
+    /// `stim.Circuit(circuit.to_stim())` samples the same noisy circuit.
+    fn to_stim(&self) -> PyResult<String> {
+        qvd::stabilizer::to_stim(&self.inner).map_err(value_error)
+    }
+
     /// The instructions as `(name, qubits, params)` tuples; `params` holds
-    /// the classical bit for measurements and is empty for unitaries.
+    /// the classical bit for measurements, is empty for unitaries, and holds
+    /// the probabilities of noise channels (named as in Stim, lower case).
     fn instructions(&self) -> Vec<(String, Vec<usize>, Vec<f64>)> {
         self.inner
             .instructions
@@ -229,6 +338,10 @@ impl PyCircuit {
                 }
                 Instruction::Reset { qubit } => ("reset".into(), vec![*qubit], Vec::new()),
                 Instruction::Barrier { qubits } => ("barrier".into(), qubits.clone(), Vec::new()),
+                Instruction::Noise { channel, qubits } => {
+                    let (name, params) = channel.stim_name();
+                    (name.to_lowercase(), qubits.clone(), params)
+                }
             })
             .collect()
     }
@@ -323,7 +436,12 @@ impl PyRunResult {
 }
 
 /// An expectation value from Pauli propagation, with its error bound.
-#[pyclass(name = "ExpectationResult", module = "qevedo.simulator", frozen, get_all)]
+#[pyclass(
+    name = "ExpectationResult",
+    module = "qevedo.simulator",
+    frozen,
+    get_all
+)]
 struct PyExpectationResult {
     /// The (approximate) expectation value.
     value: f64,
@@ -537,6 +655,41 @@ fn statevector_bytes<'py>(
     Ok(PyBytes::new(py, &bytes))
 }
 
+/// Shots of a Clifford circuit (noisy or not) on the stabilizer backend,
+/// measurement-major and bit-packed: classical bit `c` of shot `s` is bit
+/// `s % 8` of byte `c * ceil(shots / 8) + s / 8`; see
+/// `qevedo.simulator.sample`.
+#[pyfunction]
+#[pyo3(signature = (circuit, shots, seed = None, threads = None))]
+fn sample_bytes<'py>(
+    py: Python<'py>,
+    circuit: &PyCircuit,
+    shots: usize,
+    seed: Option<u64>,
+    threads: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let placement = parse_threads(threads)?;
+    let inner = circuit.inner.clone();
+    let samples = compute(py, placement, move || {
+        qvd::stabilizer::sample(&inner, shots, seed)
+    })
+    .map_err(value_error)?;
+    let width = shots.div_ceil(8);
+    let mut bytes = Vec::with_capacity(samples.num_clbits * width);
+    for c in 0..samples.num_clbits {
+        let start = bytes.len();
+        for word in samples.clbit_words(c) {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        bytes.truncate(start + width);
+        // Clear the unspecified bits past the last shot.
+        if !shots.is_multiple_of(8) {
+            bytes[start + width - 1] &= (1u8 << (shots % 8)) - 1;
+        }
+    }
+    Ok(PyBytes::new(py, &bytes))
+}
+
 /// The backend `run` would use for this circuit and these options.
 #[pyfunction]
 #[pyo3(signature = (circuit, backend = "auto", precision = "single", max_bond_dimension = 256, truncation_threshold = 1e-16))]
@@ -574,6 +727,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(expectation, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(statevector_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(sample_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(choose_backend, m)?)?;
     m.add_function(wrap_pyfunction!(uses_avx2, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

@@ -2,7 +2,8 @@
 
 Build circuits with :class:`Circuit` (or read OpenQASM 2/3 with
 :meth:`Circuit.from_qasm`), then sample them with :func:`run` or get the
-final state with :func:`statevector`, or compute expectation values of
+final state with :func:`statevector`, draw raw measurement records of
+noisy Clifford circuits with :func:`sample`, or compute expectation values of
 circuits far too large for a state vector with :func:`expectation`. ``run`` chooses the method
 automatically: the stabilizer backend for Clifford circuits, the
 near-Clifford backend when few non-Clifford gates are ever active, the
@@ -49,6 +50,7 @@ from qevedo.simulator._native import (  # noqa: E402
     choose_backend as _choose_backend,
     expectation as _expectation,
     run as _run,
+    sample_bytes as _sample_bytes,
     statevector_bytes as _statevector_bytes,
     uses_avx2,
 )
@@ -58,6 +60,7 @@ __all__ = [
     "ExpectationResult",
     "RunResult",
     "run",
+    "sample",
     "statevector",
     "expectation",
     "choose_backend",
@@ -129,6 +132,35 @@ def statevector(circuit: Circuit | str, *, threads: int | str | None = None):
         values = struct.unpack(f"<{len(raw) // 8}d", raw)
         return [complex(values[i], values[i + 1]) for i in range(0, len(values), 2)]
     return np.frombuffer(raw, dtype="<c16").copy()
+
+
+def sample(
+    circuit: Circuit | str,
+    shots: int,
+    *,
+    seed: int | None = None,
+    threads: int | str | None = None,
+    bit_packed: bool = False,
+):
+    """Shots of a Clifford circuit on the stabilizer backend, as raw
+    measurement results rather than counts: the input decoders and
+    error-correction studies need.
+
+    Pauli noise channels (``x_error``, ``depolarize1``, ``depolarize2``,
+    ...) are sampled independently in every shot. The result is
+    measurement-major, as Stim's ``FlipSimulator``: a NumPy bool array of
+    shape ``(num_clbits, shots)``, or with ``bit_packed=True`` a uint8
+    array of shape ``(num_clbits, ceil(shots / 8))`` with shot ``s`` in
+    bit ``s % 8`` of byte ``s // 8``. Needs NumPy.
+    """
+    import numpy as np
+
+    circuit = _circuit(circuit)
+    raw = _sample_bytes(circuit, shots, seed=seed, threads=threads)
+    packed = np.frombuffer(raw, dtype=np.uint8).reshape(circuit.num_clbits, (shots + 7) // 8)
+    if bit_packed:
+        return packed.copy()
+    return np.unpackbits(packed, axis=1, count=shots, bitorder="little").astype(bool)
 
 
 def _terms(observable) -> list[tuple[str, float]]:

@@ -243,6 +243,7 @@ fn broadcasting_ranges_resets_and_barriers() {
             Instruction::Measure { qubit, clbit } => format!("m{qubit}{clbit}"),
             Instruction::Reset { qubit } => format!("r{qubit}"),
             Instruction::Barrier { qubits } => format!("b{qubits:?}"),
+            Instruction::Noise { .. } => unreachable!("OpenQASM has no noise"),
         })
         .collect();
     assert_eq!(

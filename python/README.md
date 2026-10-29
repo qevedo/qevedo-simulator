@@ -35,11 +35,29 @@ e = expectation(Circuit(2).h(0).cx(0, 1), {"Z0 Z1": 1.0, "X0 X1": 0.5})
 print(e.value, e.truncated_one_norm)  # 1.5, and a bound on its error (0)
 ```
 
+Clifford circuits can carry Pauli noise channels (`x_error`, `y_error`,
+`z_error`, `pauli_channel_1`, `depolarize1`, `depolarize2`, Stim's
+channels), sampled independently in every shot by the stabilizer backend.
+`sample` returns the raw measurement records, measurement-major like Stim's
+`FlipSimulator`, and `to_stim` writes the same circuit for Stim:
+
+```python
+from qevedo.simulator import Circuit, sample
+
+c = Circuit(3)
+for _ in range(10):                      # a small repetition code
+    c.reset(1).x_error(1, 0.001)
+    c.cx(0, 1).depolarize2(0, 1, 0.001).cx(2, 1).depolarize2(2, 1, 0.001)
+    c.x_error(1, 0.001).measure(1, c.num_clbits)
+bits = sample(c, 100_000, seed=1)        # NumPy bool array, (10, 100000)
+print(c.to_stim().splitlines()[:3])      # ['R 1', 'X_ERROR(0.001) 1', 'CX 0 1']
+```
+
 `run` chooses the simulation method automatically:
 
 | Backend | For | Scale on one workstation |
 |---|---|---|
-| `stabilizer` | Clifford circuits | tens of thousands of qubits |
+| `stabilizer` | Clifford circuits, with Pauli noise | tens of thousands of qubits |
 | `near_clifford` | Clifford circuits with few non-Clifford gates | hundreds of qubits, ~30 active |
 | `statevector` | anything that fits in memory (AVX2 kernels, gate fusion) | ~32 qubits |
 | `mps` | low-entanglement circuits | 100+ qubits, approximate beyond χ |

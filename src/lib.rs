@@ -24,7 +24,7 @@ pub mod stabilizer;
 pub mod state;
 pub mod threads;
 
-pub use circuit::{Circuit, Gate, Instruction};
+pub use circuit::{Circuit, Gate, Instruction, Noise};
 pub use matrix::{C64, Matrix};
 pub use simulator::{Backend, Options, RunResult, Stats, choose_backend, run, statevector};
 pub use state::StateVector;

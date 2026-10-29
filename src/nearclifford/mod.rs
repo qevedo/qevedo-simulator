@@ -178,10 +178,12 @@ fn toffoli(a: usize, b: usize, t: usize) -> Vec<Step> {
     ]
 }
 
-/// Whether every gate of the circuit can be lowered.
+/// Whether every gate of the circuit can be lowered (and it has no noise
+/// channels, which only the stabilizer backend samples).
 pub fn is_supported(circuit: &Circuit) -> bool {
     circuit.instructions.iter().all(|i| match i {
         Instruction::Gate { gate, qubits } => decompose(gate, qubits).is_some(),
+        Instruction::Noise { .. } => false,
         _ => true,
     })
 }
@@ -220,6 +222,7 @@ pub fn peak_active_qubits(circuit: &Circuit) -> Option<usize> {
             }
             Instruction::Reset { qubit } => state.reset(*qubit, &mut rng),
             Instruction::Barrier { .. } => {}
+            Instruction::Noise { .. } => unreachable!("rejected by is_supported"),
         }
     }
     Some(state.peak_active_qubits())
@@ -720,6 +723,7 @@ fn branch(
                     continue;
                 }
                 Instruction::Barrier { .. } => continue,
+                Instruction::Noise { .. } => unreachable!("rejected by run"),
                 Instruction::Reset { qubit } => (*qubit, None),
                 Instruction::Measure { qubit, clbit } => {
                     // Gather the run of measurements on distinct qubits.
@@ -1031,7 +1035,10 @@ pub fn run(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<RunResu
         None => Pcg64::from_rng(&mut rand::rng()),
     };
     if !is_supported(circuit) {
-        return Err("the circuit has gates the near-Clifford backend does not support".into());
+        return Err(
+            "the circuit has gates or noise channels the near-Clifford backend does not support"
+                .into(),
+        );
     }
     let start = Instant::now();
     let instructions = &circuit.instructions;

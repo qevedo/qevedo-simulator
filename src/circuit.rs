@@ -220,6 +220,60 @@ pub enum Instruction {
     Barrier {
         qubits: Vec<usize>,
     },
+    /// A Pauli noise channel on `qubits` (for [`Noise::Depolarize2`], on
+    /// consecutive pairs). Only the stabilizer backend runs noisy circuits.
+    Noise {
+        channel: Noise,
+        qubits: Vec<usize>,
+    },
+}
+
+/// A Pauli noise channel: with some probability a random Pauli error,
+/// drawn independently in every shot. These are the channels of Stim's
+/// circuit-level noise models, and the stabilizer backend samples them
+/// exactly by adding the errors to each shot's Pauli frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Noise {
+    /// On each qubit independently: X with probability `px`, Y with `py`,
+    /// Z with `pz` (`X_ERROR`, `Y_ERROR`, `Z_ERROR`, `DEPOLARIZE1` and
+    /// `PAULI_CHANNEL_1` in Stim).
+    Pauli1 { px: f64, py: f64, pz: f64 },
+    /// On each pair of qubits: each of the 15 non-identity two-qubit Paulis
+    /// with probability `p / 15` (`DEPOLARIZE2` in Stim).
+    Depolarize2(f64),
+}
+
+impl Noise {
+    /// The probability that the channel applies any error (to one qubit,
+    /// or to one pair for `Depolarize2`).
+    pub fn probability(&self) -> f64 {
+        match *self {
+            Noise::Pauli1 { px, py, pz } => px + py + pz,
+            Noise::Depolarize2(p) => p,
+        }
+    }
+
+    /// Qubits per target: 1, or 2 for `Depolarize2`.
+    pub fn arity(&self) -> usize {
+        match self {
+            Noise::Pauli1 { .. } => 1,
+            Noise::Depolarize2(_) => 2,
+        }
+    }
+
+    /// Stim's name and arguments for the channel.
+    pub fn stim_name(&self) -> (&'static str, Vec<f64>) {
+        match *self {
+            Noise::Pauli1 { px, py, pz } => match (px, py, pz) {
+                (p, 0.0, 0.0) => ("X_ERROR", vec![p]),
+                (0.0, p, 0.0) => ("Y_ERROR", vec![p]),
+                (0.0, 0.0, p) => ("Z_ERROR", vec![p]),
+                _ if px == py && py == pz => ("DEPOLARIZE1", vec![3.0 * px]),
+                _ => ("PAULI_CHANNEL_1", vec![px, py, pz]),
+            },
+            Noise::Depolarize2(p) => ("DEPOLARIZE2", vec![p]),
+        }
+    }
 }
 
 /// A quantum circuit on `num_qubits` qubits and `num_clbits` classical bits.
@@ -337,6 +391,96 @@ impl Circuit {
         self
     }
 
+    /// Add a noise channel on `qubits` (pairs of qubits for
+    /// [`Noise::Depolarize2`]).
+    pub fn noise(&mut self, channel: Noise, qubits: &[usize]) -> &mut Self {
+        let probabilities = match channel {
+            Noise::Pauli1 { px, py, pz } => vec![px, py, pz],
+            Noise::Depolarize2(p) => vec![p],
+        };
+        assert!(
+            probabilities.iter().all(|p| (0.0..=1.0).contains(p)) && channel.probability() <= 1.0,
+            "noise probabilities must lie in [0, 1] and sum to at most 1: {channel:?}"
+        );
+        assert!(qubits.iter().all(|&q| q < self.num_qubits));
+        assert!(
+            qubits.len().is_multiple_of(channel.arity()),
+            "{channel:?} acts on pairs of qubits"
+        );
+        if channel.arity() == 2 {
+            assert!(
+                qubits.chunks(2).all(|p| p[0] != p[1]),
+                "the qubits of a pair must differ"
+            );
+        }
+        self.instructions.push(Instruction::Noise {
+            channel,
+            qubits: qubits.to_vec(),
+        });
+        self
+    }
+
+    /// A bit flip (X) with probability `p`.
+    pub fn x_error(&mut self, qubit: usize, p: f64) -> &mut Self {
+        self.noise(
+            Noise::Pauli1 {
+                px: p,
+                py: 0.0,
+                pz: 0.0,
+            },
+            &[qubit],
+        )
+    }
+
+    /// A Y error with probability `p`.
+    pub fn y_error(&mut self, qubit: usize, p: f64) -> &mut Self {
+        self.noise(
+            Noise::Pauli1 {
+                px: 0.0,
+                py: p,
+                pz: 0.0,
+            },
+            &[qubit],
+        )
+    }
+
+    /// A phase flip (Z) with probability `p`.
+    pub fn z_error(&mut self, qubit: usize, p: f64) -> &mut Self {
+        self.noise(
+            Noise::Pauli1 {
+                px: 0.0,
+                py: 0.0,
+                pz: p,
+            },
+            &[qubit],
+        )
+    }
+
+    /// X, Y or Z, each with probability `p / 3`.
+    pub fn depolarize1(&mut self, qubit: usize, p: f64) -> &mut Self {
+        let q = p / 3.0;
+        self.noise(
+            Noise::Pauli1 {
+                px: q,
+                py: q,
+                pz: q,
+            },
+            &[qubit],
+        )
+    }
+
+    /// Each non-identity two-qubit Pauli with probability `p / 15`.
+    pub fn depolarize2(&mut self, a: usize, b: usize, p: f64) -> &mut Self {
+        self.noise(Noise::Depolarize2(p), &[a, b])
+    }
+
+    /// Whether the circuit contains noise channels.
+    pub fn has_noise(&self) -> bool {
+        self.instructions
+            .iter()
+            .any(|i| matches!(i, Instruction::Noise { .. }))
+    }
+
     pub fn barrier(&mut self) -> &mut Self {
         self.instructions.push(Instruction::Barrier {
             qubits: (0..self.num_qubits).collect(),
@@ -345,7 +489,8 @@ impl Circuit {
     }
 
     /// The circuit as OpenQASM 2 using `qelib1.inc` gate names, so other
-    /// simulators can run exactly the same circuit. Fails on `Unitary` gates.
+    /// simulators can run exactly the same circuit. Fails on `Unitary` gates
+    /// and noise channels.
     pub fn to_qasm(&self) -> Result<String, String> {
         use std::fmt::Write;
         let mut out = String::from("OPENQASM 2.0;\ninclude \"qelib1.inc\";\n");
@@ -382,6 +527,9 @@ impl Circuit {
                     let _ = writeln!(out, "reset q[{qubit}];");
                 }
                 Instruction::Barrier { .. } => out.push_str("barrier q;\n"),
+                Instruction::Noise { .. } => {
+                    return Err("noise channels cannot be written as OpenQASM 2".into());
+                }
             }
         }
         Ok(out)

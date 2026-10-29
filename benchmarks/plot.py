@@ -278,6 +278,39 @@ def pauliprop():
     ax.set_ylim(top=max(max(v.values()) for v in times.values()) * 20)
     save(fig, "pauliprop.svg")
 
+def noise():
+    rows = [r for r in read("noise.csv") if float(r["p"]) > 0]
+    series = defaultdict(list)
+    for r in rows:
+        if r["simulator"] == "qvd":
+            name = "qvd" if r["threads"] != "1" else "qvd, 1 thread"
+        else:
+            name = "stim, flip simulator" if "Flip" in r["method"] else "stim, sample()"
+        series[name].append((int(r["qubits"]), float(r["seconds"]), int(r["distance"])))
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    labels = {
+        "qvd": "qvd, 4 vCPUs",
+        "qvd, 1 thread": "qvd, 1 thread",
+        "stim, flip simulator": "Stim, reference + FlipSimulator",
+        "stim, sample()": "Stim, compile_sampler().sample()",
+    }
+    for name, label in labels.items():
+        points = sorted(series[name])
+        style = "-" if name.startswith("qvd") else "--"
+        ax.plot([p[0] for p in points], [p[1] for p in points], style, marker="o",
+                color=COLORS[name], label=label, linewidth=2 if name == "qvd" else 1.5)
+    distances = sorted({(q, d) for pts in series.values() for q, _, d in pts})
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xticks([q for q, _ in distances])
+    ax.set_xticklabels([f"{q:,}\nd={d}" for q, d in distances])
+    ax.minorticks_off()
+    ax.set_xlabel("qubits (rotated surface code, d rounds, depolarizing noise p = 0.001)")
+    ax.set_ylabel("seconds for 10,000 shots (log scale)")
+    ax.set_title("Noisy Clifford circuits: surface code sampling (4-vCPU VM)")
+    ax.legend(frameon=False, loc="center left", bbox_to_anchor=(1.01, 0.5))
+    save(fig, "noise.svg")
+
 
 if __name__ == "__main__":
     statevector()
@@ -286,4 +319,5 @@ if __name__ == "__main__":
     mps()
     stabilizer()
     stabilizer_steps()
+    noise()
     print(f"wrote {', '.join(p.name for p in sorted(CHARTS.glob('*.svg')))}")

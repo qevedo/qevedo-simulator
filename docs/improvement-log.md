@@ -3,6 +3,76 @@
 One entry per improvement run: what changed, why, what it measured, and
 what to try next. Newest first.
 
+## 2026-10-29 — Pauli noise in the stabilizer backend (0.1.2)
+
+**What.** Pauli noise channels, sampled independently in every shot:
+- `Instruction::Noise` with `qvd::Noise::Pauli1 { px, py, pz }` (Stim's
+  `X_ERROR`, `Y_ERROR`, `Z_ERROR`, `DEPOLARIZE1`, `PAULI_CHANNEL_1`) and
+  `Noise::Depolarize2(p)`; `Circuit::x_error`, `depolarize1`, ... .
+- The stabilizer sampler adds the errors to each shot's Pauli frame,
+  drawing geometric gaps between errors rather than a random bit per qubit
+  and shot. Channels are held back until a gate touches their qubits, so a
+  layer's per-gate channels become one step.
+- `library::with_depolarizing_noise` (Stim's uniform circuit-level model),
+  `stabilizer::to_stim`, the `--noise` and `--stim` options of the
+  `stabilizer` example, and `benchmarks/bench_noise.py`.
+- In Python: the channels on `Circuit`, `Circuit.to_stim`, and
+  `sample(circuit, shots)`, which returns the raw measurement records as a
+  NumPy array (measurement-major, like Stim's `FlipSimulator`).
+- Other backends reject noisy circuits instead of ignoring the noise.
+
+**Why.** Roadmap item 6, and the gap that kept the stabilizer backend from
+its main use: error-correction studies sample noisy circuits, and before
+this run qvd could only sample noiseless ones, so its lead over Stim held
+only on a workload nobody runs. It is Stim's own method (Gidney, *Quantum*
+5, 497, 2021, arXiv:2103.02202). It can be checked end to end today:
+exactly against summed error combinations, and statistically against Stim
+on the same file. The other candidates (a compact Pauli-propagation store,
+a calibrated backend selector) improve features that already work.
+
+**Measured** (4-vCPU Xeon VM; `benchmarks/results/noise*.csv`). Surface
+codes with p = 0.001, 10,000 shots, the same Stim file in both:
+
+| d | qvd, 4 threads | qvd, 1 thread | Stim reference + `FlipSimulator` |
+|---|---|---|---|
+| 11 | 0.009 s | 0.007 s | 0.008 s |
+| 21 | 0.040 s | 0.050 s | 0.060 s |
+| 51 | 0.54 s | 0.90 s | 1.54 s |
+| 101 | 6.0 s | 14.9 s | 37.5 s |
+
+Detection rates agree with Stim within sampling error (largest |z| over
+16–288 detectors: 1.57–2.42 at d = 3 and 5. At d = 7 it was 4.19 on one
+detector; four further seeds gave 2.4–3.3, each time on a different
+detector). Noiseless timings, best of 5–9, interleaved against the
+previous build: ratios 0.998–1.008 on the stabilizer cases. The other
+benchmark binaries came out 0.96–1.03× the previous build in one
+interleaved pass (best of 3–5). Their code changed only by a scan for noise
+channels, and the 1.033× on the 24-qubit state vector is within the
+pass-to-pass spread on this VM.
+
+**Learned.**
+- The first version put the channel inline in the step enum. That doubled
+  every step, and noiseless circuits ran 5–8% slower, because the steps are
+  walked in cache-sized segments. An index into a side table, with the
+  noise routine kept out of line, removed the slowdown.
+- A circuit written one target per line costs Stim a lot: 14 GB and a kill
+  at d = 51 with noise, and 1.7× its time at d = 21 without. The recorded
+  noiseless Stim times (`stabilizer.csv`, the i9) were measured that way,
+  so they flatter qvd at d = 11 and 21. `compare_stim.py` now groups
+  instructions. Re-timed fairly on the VM without noise, qvd and Stim are
+  level at d = 11 and 21 (0.005 / 0.006 s, 0.030 / 0.039 s on one thread);
+  at d = 51 and 101 qvd stays 1.4× and 3.0× faster on one thread. The README
+  says this next to the i9 table.
+
+**Next.**
+1. A Stim-format reader with `DETECTOR`, `OBSERVABLE_INCLUDE` and `M(p)`,
+   so qvd runs Stim's generated circuits directly and returns detection
+   events (what decoders such as PyMatching take), and a logical-error-rate
+   example.
+2. Noise on the near-Clifford backend's per-shot frames (noisy
+   magic-state circuits, as Clifft and SymFT target).
+3. The compact Pauli-propagation store from the previous entry.
+
 ## 2026-10-28 — Pauli propagation for expectation values (0.1.1)
 
 **What.** A new module, `pauliprop/`: `<0|U† O U|0>` for unitary circuits

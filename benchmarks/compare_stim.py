@@ -16,6 +16,11 @@ GATES = {"h": "H", "s": "S", "sdg": "S_DAG", "x": "X", "y": "Y", "z": "Z", "sx":
 
 
 def qasm_to_stim(text):
+    """The Stim circuit of a QASM file, with consecutive instructions of the
+    same name on one line, as in Stim's own circuits (Stim applies a line's
+    targets in order, so this is the same circuit). One instruction per line
+    slows Stim down: 1.7x at d = 21 and 1.07x at d = 51 on the 4-vCPU VM, and
+    the recorded results in results/stabilizer.csv were measured that way."""
     import stim
 
     lines = []
@@ -33,7 +38,14 @@ def qasm_to_stim(text):
             name = line.split()[0]
             qubits = " ".join(re.findall(r"q\[(\d+)\]", line))
             lines.append(f"{GATES[name]} {qubits}")
-    return stim.Circuit("\n".join(lines))
+    merged = []
+    for line in lines:
+        name, _, targets = line.partition(" ")
+        if merged and merged[-1][0] == name:
+            merged[-1][1].append(targets)
+        else:
+            merged.append((name, [targets]))
+    return stim.Circuit("\n".join(f"{name} {' '.join(t)}" for name, t in merged))
 
 
 def main():

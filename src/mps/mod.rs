@@ -80,6 +80,10 @@ pub fn run(circuit: &Circuit, shots: usize, options: &Options) -> RunResult {
         Some(seed) => Pcg64::seed_from_u64(seed),
         None => Pcg64::from_rng(&mut rand::rng()),
     };
+    assert!(
+        !circuit.has_noise(),
+        "noise channels run on the stabilizer backend only"
+    );
     let mut result = RunResult::default();
     result.stats.gates = circuit.gate_count();
     let start = Instant::now();

@@ -3,11 +3,15 @@
 //!     cargo run --release --example stabilizer -- surface <distance> <rounds> <shots> [--qasm FILE]
 //!     cargo run --release --example stabilizer -- random <qubits> <depth> <shots> [--qasm FILE]
 //!
+//! `--noise P` adds uniform circuit-level depolarizing noise of strength P
+//! (`library::with_depolarizing_noise`); `--stim FILE` writes the circuit,
+//! noise included, in Stim's format for `benchmarks/compare_stim.py`.
+//!
 //! `QVD_THREADS=all|pcores|<n>` picks the thread pool (default: P-cores).
 
 use std::time::Instant;
 
-use qvd::library::{random_clifford, surface_code};
+use qvd::library::{random_clifford, surface_code, with_depolarizing_noise};
 use qvd::stabilizer;
 use qvd::threads::{Placement, pool};
 
@@ -26,6 +30,12 @@ fn main() {
     }
     if let Some(i) = args.iter().position(|s| s == "--qasm") {
         std::fs::write(&args[i + 1], circuit.to_qasm().unwrap()).unwrap();
+    }
+    if let Some(i) = args.iter().position(|s| s == "--noise") {
+        circuit = with_depolarizing_noise(&circuit, args[i + 1].parse().unwrap());
+    }
+    if let Some(i) = args.iter().position(|s| s == "--stim") {
+        std::fs::write(&args[i + 1], stabilizer::to_stim(&circuit).unwrap()).unwrap();
     }
     let measurements = circuit
         .instructions

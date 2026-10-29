@@ -330,6 +330,11 @@ fn run_on<T: Real>(
             return crate::stabilizer::run(circuit, shots, options.seed)
                 .map_err(std::io::Error::other);
         }
+        _ if circuit.has_noise() => {
+            return Err(std::io::Error::other(format!(
+                "noise channels run on the stabilizer backend only (Clifford circuits), not {backend:?}"
+            )));
+        }
         Backend::Mps => return Ok(crate::mps::run(circuit, shots, options)),
         Backend::NearClifford => {
             return crate::nearclifford::run(circuit, shots, options.seed)
@@ -393,6 +398,7 @@ fn run_on<T: Real>(
                     );
                     state.reset(*qubit, &mut rng);
                 }
+                Instruction::Noise { .. } => unreachable!("rejected by run_on"),
             }
         }
         apply_ops(&mut state, &pending, options, &mut result.stats);

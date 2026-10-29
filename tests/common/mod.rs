@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use qvd::{C64, Circuit, Gate, Instruction, Matrix, reference};
+use qvd::{C64, Circuit, Gate, Instruction, Matrix, Noise, reference};
 use rand::{Rng, RngExt, SeedableRng};
 use rand_pcg::Pcg64;
 
@@ -89,8 +89,32 @@ pub fn project(state: &mut [C64], qubit: usize, outcome: bool) -> f64 {
     p
 }
 
+/// The Pauli errors a noise channel applies to one target, with their
+/// probabilities (the identity first).
+fn noise_branches(channel: Noise, target: &[usize]) -> Vec<(f64, Vec<(Gate, usize)>)> {
+    let paulis = [None, Some(Gate::X), Some(Gate::Z), Some(Gate::Y)];
+    match channel {
+        Noise::Pauli1 { px, py, pz } => vec![
+            (1.0 - px - py - pz, vec![]),
+            (px, vec![(Gate::X, target[0])]),
+            (py, vec![(Gate::Y, target[0])]),
+            (pz, vec![(Gate::Z, target[0])]),
+        ],
+        Noise::Depolarize2(p) => (0..16)
+            .map(|k| {
+                let errors: Vec<(Gate, usize)> = [(k & 3, target[0]), (k >> 2, target[1])]
+                    .into_iter()
+                    .filter_map(|(i, q)| paulis[i].clone().map(|g| (g, q)))
+                    .collect();
+                (if k == 0 { 1.0 - p } else { p / 15.0 }, errors)
+            })
+            .collect(),
+    }
+}
+
 /// The exact distribution of the classical bits, branching on every
-/// measurement and reset of a dense simulation.
+/// measurement and reset of a dense simulation, and on every error of
+/// every noise channel.
 pub fn exact_distribution(circuit: &Circuit) -> std::collections::BTreeMap<String, f64> {
     fn walk(
         circuit: &Circuit,
@@ -107,6 +131,20 @@ pub fn exact_distribution(circuit: &Circuit) -> std::collections::BTreeMap<Strin
                     continue;
                 }
                 Instruction::Barrier { .. } => continue,
+                Instruction::Noise { channel, qubits } => {
+                    // One target per instruction (split below).
+                    for (p, errors) in noise_branches(*channel, qubits) {
+                        if p <= 0.0 {
+                            continue;
+                        }
+                        let mut branch = state.clone();
+                        for (gate, q) in errors {
+                            reference::apply(&mut branch, &gate.matrix(), &[q]);
+                        }
+                        walk(circuit, i + 1, branch, clbits.clone(), weight * p, out);
+                    }
+                    return;
+                }
                 Instruction::Measure { qubit, clbit } => (*qubit, Some(*clbit)),
                 Instruction::Reset { qubit } => (*qubit, None),
             };
@@ -134,6 +172,23 @@ pub fn exact_distribution(circuit: &Circuit) -> std::collections::BTreeMap<Strin
             .collect();
         *out.entry(key).or_default() += weight;
     }
+    // Noise channels with several targets act on each independently.
+    let mut split = circuit.clone();
+    split.instructions = circuit
+        .instructions
+        .iter()
+        .flat_map(|instruction| match instruction {
+            Instruction::Noise { channel, qubits } => qubits
+                .chunks(channel.arity())
+                .map(|target| Instruction::Noise {
+                    channel: *channel,
+                    qubits: target.to_vec(),
+                })
+                .collect(),
+            other => vec![other.clone()],
+        })
+        .collect();
+    let circuit = &split;
     let mut state = vec![C64::new(0.0, 0.0); 1 << circuit.num_qubits];
     state[0] = C64::new(1.0, 0.0);
     let mut out = std::collections::BTreeMap::new();

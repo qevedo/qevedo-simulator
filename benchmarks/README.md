@@ -10,6 +10,8 @@ benchmarks/
 │   ├── machine.json            hardware, versions, measurement notes
 │   ├── statevector.csv         dense simulation: qvd vs qsim vs Qiskit Aer
 │   ├── stabilizer.csv          Clifford circuits: qvd vs Stim vs Qiskit Aer
+│   ├── noise.csv               noisy (and noiseless) surface codes: qvd vs Stim
+│   ├── noise_agreement.csv     detection rates of noisy codes: qvd vs Stim
 │   ├── mps.csv                 matrix product states: qvd vs Qiskit Aer vs quimb
 │   ├── nearclifford.csv        Clifford+T circuits: qvd vs Qiskit Aer
 │   ├── pauliprop.csv           expectation values: qvd vs IBM's pauli-prop
@@ -17,6 +19,7 @@ benchmarks/
 ├── charts/                     SVGs drawn from results/ by plot.py
 ├── compare.py                  times Qiskit Aer and qsim on a QASM file
 ├── compare_stim.py             times Stim and Qiskit Aer's stabilizer method
+├── bench_noise.py              noisy surface codes against Stim -> noise*.csv
 ├── compare_mps.py              times Qiskit Aer's and quimb's MPS simulators
 ├── compare_nearclifford.py     times Qiskit Aer's methods on Clifford+T circuits
 ├── compare_pauliprop.py        times IBM's pauli-prop on an expectation value
@@ -71,6 +74,27 @@ The steps that took the distance-101 code (20,401 qubits, 101 rounds) from
 measured under the heavier load; under that same load the build before it
 took 2.57 s. [docs/DESIGN.md](../docs/DESIGN.md)
 explains each one.
+
+Stim's times here come from circuits with one instruction per line, as
+`compare_stim.py` wrote them then; that slows Stim by 1.7× at d = 21 and
+1.07× at d = 51 (measured on the 4-vCPU VM below). The script now groups
+consecutive instructions, and the next section has the fair comparison.
+
+## Noisy Clifford circuits
+
+![Noisy stabilizer benchmark](charts/noise.svg)
+
+The surface codes above with uniform circuit-level depolarizing noise,
+p = 0.001 (`library::with_depolarizing_noise`), and without it (p = 0 rows
+in `noise.csv`), 10,000 shots. Measured on the 4-vCPU Xeon virtual machine
+(`pauliprop_machine` in `machine.json`), not the i9. Both simulators read
+the same Stim file written by the `stabilizer` example (`--stim`), with one
+instruction per layer and channel as in Stim's generated circuits. qvd ran
+on 4 threads and on 1 (best of 3); Stim on one thread, best of 3 (one run
+at d = 101). `noise_agreement.csv` compares the fraction of shots in which
+each detector fires (XOR of consecutive measurements of one ancilla),
+qvd through the Python package against Stim's sampler, 200,000 shots each,
+with a two-sample z-score per detector.
 
 ## Matrix product states
 
@@ -127,6 +151,11 @@ cargo run --release --example bench -- random 28 20 f32 4 14 --qasm /tmp/c.qasm
 cargo run --release --example stabilizer -- surface 51 51 10000 --qasm /tmp/s.qasm
 .bench-venv/bin/python benchmarks/compare_stim.py /tmp/s.qasm --shots 10000
 
+# Noisy surface codes against Stim (and the Python package, for agreement).
+cargo build --release --example stabilizer
+(cd python && maturin develop --release)
+.bench-venv/bin/python benchmarks/bench_noise.py
+
 # MPS: 64 qubits, depth 20, χ ≤ 256, 1000 shots.
 cargo run --release --example mps -- random 64 20 256 1000 --qasm /tmp/m.qasm
 .bench-venv/bin/python benchmarks/compare_mps.py /tmp/m.qasm --max-bond 256 --shots 1000
@@ -148,8 +177,9 @@ cargo build --release --example pauliprop
 (`f32`, `f64`), maximum fused qubits and region bits (0 turns cache blocking
 off); `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads. The
 `stabilizer` example takes `surface <distance> <rounds> <shots>` or
-`random <qubits> <depth> <shots>`; `QVD_THREADS=pcores|all|<n>` selects the
-threads (P-cores by default). The `mps` example takes
+`random <qubits> <depth> <shots>`, with `--noise P` for depolarizing noise
+and `--stim FILE` to write the circuit in Stim's format;
+`QVD_THREADS=pcores|all|<n>` selects the threads (P-cores by default). The `mps` example takes
 `<random|grid|qft|ghz> <qubits | ROWSxCOLS> <depth> <max bond> [shots]`, and
 the `nearclifford` example `<qubits> <depth> <T count> [shots] [--backend nc|sv|mps]`,
 and the `pauliprop` example `<steps> <θ_h> <observable> [threshold] [max terms]`

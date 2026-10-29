@@ -270,6 +270,42 @@ for qvd's. `sample()`, which returns shot-major bits, is 9–27× slower than
 Stim's flip simulator here. Single-threaded, qvd is 1.3–2.8× faster than
 Stim; with 8 P-cores it is 3–8× faster.
 
+**Noise.** A Pauli noise channel (`Noise::Pauli1 { px, py, pz }` per
+qubit, which covers Stim's `X_ERROR`, `Y_ERROR`, `Z_ERROR`, `DEPOLARIZE1`
+and `PAULI_CHANNEL_1`, and `Noise::Depolarize2(p)` per pair) puts a random
+Pauli error on a shot. A Pauli error only multiplies the shot's frame, so
+the reference shot ignores noise altogether and each frame XORs in its own
+errors, exactly as in Stim. Three details make it cheap:
+- *Gaps, not coin flips.* Within a 64-shot word, the shots × targets of a
+  channel are one run of Bernoulli trials. The sampler draws the
+  geometrically distributed gap to the next error,
+  `⌊ln u / ln(1 − p)⌋`. A second draw picks the Pauli. At p = 10⁻³
+  one qubit in 16 gets an error in a given word, so a layer costs one draw
+  per word plus two per error, instead of a random bit per qubit and shot. Every word keeps its own random stream, so results still depend
+  only on the seed (a test compares 1 and 3 threads bit for bit).
+- *Layers of noise.* Channels are held back until a gate, measurement or
+  reset touches one of their qubits: a Pauli channel commutes with gates on
+  other qubits and with other Pauli channels. So
+  `CX a b; DEPOLARIZE2 a b; CX c d; DEPOLARIZE2 c d; …` becomes one noise
+  step per layer, and the gaps span the whole layer.
+  `library::with_depolarizing_noise` builds its circuits the same way, and
+  `stabilizer::to_stim` puts consecutive instructions of the same name on
+  one line. That matters to Stim: one instruction per line cost it 1.7× at
+  d = 21 without noise, and 14 GB at d = 51 with noise (it was killed).
+- *Small steps.* A noise step stores only an index into a side table. With
+  the channel inline, every step doubled in size and noiseless circuits
+  ran 5–8% slower, since the steps are walked in cache-sized segments.
+  `Frames::noise` is also kept out of line for the same reason. After both
+  changes, noiseless runs time the same as before (best of 5–9,
+  interleaved, ratios 0.998–1.008).
+
+Noisy circuits run on the stabilizer backend only; the other backends
+return an error rather than ignore the channels. Against Stim (same file,
+4-vCPU VM, p = 0.001, 10,000 shots): 0.54 s against 1.54 s at d = 51 and
+6.0 s against 37.5 s at d = 101 (0.90 s and 14.9 s on one thread). The
+detection rates agree within sampling error (`benchmarks/bench_noise.py`;
+README, "Noisy Clifford circuits").
+
 **Correctness** (`tests/stabilizer.rs`): expectation values of random Pauli
 strings and deterministic measurement outcomes against the dense simulator
 on random Clifford circuits. Forced collapse outcomes are checked against
@@ -278,7 +314,14 @@ Sampled distributions are checked against exact branching distributions
 (5σ). Further tests cover 1,000-qubit GHZ sampling, the surface code's
 stabilizers repeating from round to round (d = 3, 5, 7), reproducibility
 across thread counts, parallel gate layers against the same gates in order
-(from both layouts), and 64×64 transposes.
+(from both layouts), and 64×64 transposes. With noise: sampled
+distributions of 40 random noisy circuits (every channel, probabilities
+including 0 and 1, mid-circuit measurements and resets) against the exact
+distribution summed over every combination of errors (5σ); flip rates of
+each channel on 300 qubits × 20,000 shots, so that gaps cross word and
+target boundaries; reproducibility across thread counts; surface-code
+detection rates growing linearly in p; and the Stim export. The Python
+tests compare a noisy repetition code with Stim directly.
 
 ## 8. Matrix product state backend (`mps/`)
 
@@ -629,6 +672,11 @@ remain (79 of its 87 s at 5 steps, θ_h = 1.2).
   that further when χ_max is far below the bond's rank. For 2D circuits,
   routing that also moves qubits apart again (or a 2D tensor network) would
   reduce the SWAPs.
+- **Noise beyond the stabilizer backend, and Stim's annotations.** The
+  near-Clifford backend's per-shot frames could take Pauli noise the same
+  way. Stim's `DETECTOR` and `OBSERVABLE_INCLUDE` (and `M(p)`) are not
+  read or written; detectors are computed from the measurement records.
+  A Stim-format reader would let qvd run Stim's own generated circuits.
 - **Fewer cache misses in the stabilizer reference shot.** Its gates are
   cache misses in a 208 MB tableau at d = 101. Storing each row's x and z
   words side by side would halve them. Random measurements (the first and

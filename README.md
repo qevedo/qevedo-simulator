@@ -17,7 +17,13 @@ below).
 Clifford circuits go to a stabilizer backend instead, which has no 2ⁿ
 memory wall: a distance-101 surface code (20,401 qubits, 5.1M gates, 1M
 measurements) samples 10,000 shots in 1.5 s, 8× faster than Stim and
-2.8× faster on a single thread (details below). Other circuits too large
+2.8× faster on a single thread (details below, including a caveat on how
+Stim was timed; re-timed fairly on a 4-vCPU machine, qvd is 6.5× and 3.0×
+faster at this size, and within 1.3× of Stim at d = 11 and 21). It also samples Pauli
+noise (Stim's channels, independently in every shot), which error-correction
+studies need: the same distance-101 code with circuit-level depolarizing
+noise samples 10,000 shots in 6.0 s on a 4-vCPU virtual machine, where
+Stim takes 37.5 s, with the same detection statistics. Other circuits too large
 for a state vector run on a matrix product state backend, exact while the
 entanglement is low and approximate, with a fidelity estimate, beyond: it is
 1.6–14× faster than the faster of Qiskit Aer's and quimb's MPS simulators on
@@ -110,6 +116,66 @@ additions matter at this scale:
   of a local code touch a few words instead of 319;
 - gates on disjoint qubits run in parallel in the reference shot;
 - frames run in parallel, cache-sized blocks.
+
+Stim's times in this table were measured with one instruction per line
+(`compare_stim.py` wrote its circuits that way), which slows Stim down:
+by 1.7× at d = 21 and 1.07× at d = 51, measured on the 4-vCPU VM. The
+script now groups consecutive instructions as Stim's own circuits do. The
+fair comparison, re-run on that VM, is in the next section; there Stim and
+qvd are within 1.3× of each other at d = 11 and 21, and qvd's lead starts
+at d = 51.
+
+### Noisy Clifford circuits (error correction)
+
+![Noisy stabilizer benchmark: qvd vs Stim](benchmarks/charts/noise.svg)
+
+The same surface codes with uniform circuit-level depolarizing noise of
+strength p = 0.001 (`library::with_depolarizing_noise`):
+- `DEPOLARIZE1` after every one-qubit gate and `DEPOLARIZE2` after every
+  two-qubit gate;
+- a bit flip before every measurement and after every reset.
+
+These match Stim's generated circuits with all their noise parameters set
+to p. Both simulators run the same Stim file, written by qvd, with one
+instruction per layer and channel. 10,000 shots, measured on a 4-vCPU Xeon
+virtual machine (not the i9 above); Stim is single-threaded.
+
+| Distance | Qubits | qvd, 4 vCPUs (1 thread) | Stim 1.16, reference + `FlipSimulator` | Stim `sample()` | Without noise: qvd, 4 vCPUs (1 thread) | Stim, reference + `FlipSimulator` |
+|---|---|---|---|---|---|---|
+| 11 | 241 | 0.009 s (**0.007 s**) | 0.008 s | 0.046 s | **0.005 s** (0.005 s) | 0.006 s |
+| 21 | 881 | **0.040 s** (0.050 s) | 0.060 s | 0.51 s | 0.037 s (**0.030 s**) | 0.039 s |
+| 51 | 5,201 | **0.54 s** (0.90 s) | 1.54 s | 13.3 s | **0.40 s** (0.57 s) | 0.83 s |
+| 101 | 20,401 | **6.0 s** (14.9 s) | 37.5 s | 375 s | **4.1 s** (8.9 s) | 26.7 s |
+
+With noise, qvd is 1.1–2.5× faster than Stim on one thread and 1.5–6.3×
+faster on 4 vCPUs from d = 21 up. At d = 11 the run takes a few milliseconds
+and the two are level. Errors cost little: qvd draws the gap to the next
+error (geometrically distributed) instead of a random number per qubit and
+shot, as Stim does. Its reference shot, the largest part at d = 101, does
+not see the noise.
+
+The two agree statistically. A detector (a stabilizer compared with its
+value in the round before) fires at the same rate in both, within
+sampling error. 200,000 shots, `benchmarks/bench_noise.py`:
+
+| Code | p | Detectors | qvd detection rate | Stim detection rate | Largest \|z\| over detectors |
+|---|---|---|---|---|---|
+| d = 3, 3 rounds | 0.001 | 16 | 0.011983 | 0.011900 | 1.57 |
+| d = 5, 5 rounds | 0.001 | 96 | 0.013543 | 0.013561 | 2.42 |
+| d = 5, 5 rounds | 0.005 | 96 | 0.064268 | 0.064356 | 2.41 |
+| d = 7, 7 rounds | 0.003 | 288 | 0.041984 | 0.041948 | 4.19 |
+
+The d = 7 row's 4.19 is a single detector. Repeated with four other seeds,
+the largest |z| was 2.4–3.3 and fell on a different detector each time,
+which is what chance gives over 288 detectors. The tests also check
+sampled distributions against exact ones summed over every combination of
+errors.
+
+What is not there yet: Stim's `DETECTOR` and `OBSERVABLE_INCLUDE`
+annotations (detectors are XORs of the returned measurement records, which
+`qevedo.simulator.sample` gives as a NumPy array), measurement-flip
+arguments such as `M(p)` (use a bit flip before the measurement), and noise
+on the other backends.
 
 ### Low-entanglement circuits (MPS)
 
@@ -268,6 +334,22 @@ e = expectation(ghz, {"Z0 Z99": 1.0, "X0": 0.5}, min_abs_coefficient=1e-5)
 print(e.value, e.truncated_one_norm)   # value and a bound on its error
 ```
 
+Clifford circuits take Pauli noise channels (`x_error`, `y_error`,
+`z_error`, `pauli_channel_1`, `depolarize1`, `depolarize2`). `sample`
+returns the raw measurement records of every shot, and `to_stim` writes
+the same circuit for Stim:
+
+```python
+from qevedo.simulator import Circuit, sample
+
+c = Circuit(3)
+for _ in range(10):                      # a small repetition code
+    c.reset(1).x_error(1, 0.001)
+    c.cx(0, 1).depolarize2(0, 1, 0.001).cx(2, 1).depolarize2(2, 1, 0.001)
+    c.x_error(1, 0.001).measure(1, c.num_clbits)
+bits = sample(c, 100_000, seed=1)        # NumPy bool array, (10, 100000)
+```
+
 See [python/README.md](python/README.md). The bindings are a PyO3 module
 built with maturin; simulations release the GIL.
 
@@ -326,6 +408,17 @@ let samples = qvd::stabilizer::sample(&circuit, 100_000, Some(1)).unwrap();
 let first_shot_bit_0 = samples.get(0, 0);
 ```
 
+Noise channels (`Circuit::noise` with a `qvd::Noise`, or `x_error`,
+`depolarize1`, `depolarize2`, ...) run on the stabilizer backend;
+`library::with_depolarizing_noise` adds the standard circuit-level model to
+any Clifford circuit, and `stabilizer::to_stim` writes Stim's format:
+
+```rust
+let circuit = qvd::library::with_depolarizing_noise(&qvd::library::surface_code(25, 25), 0.001);
+let samples = qvd::stabilizer::sample(&circuit, 100_000, Some(1)).unwrap();
+std::fs::write("d25.stim", qvd::stabilizer::to_stim(&circuit).unwrap()).unwrap();
+```
+
 Expectation values come from `qvd::pauliprop::expectation`, for unitary
 circuits of any gates except two- and more-qubit `Unitary` matrices:
 
@@ -359,8 +452,9 @@ maturin develop --release          # into the active virtualenv
 pip install pytest numpy && pytest
 ```
 
-Pushing a tag `vX.Y.Z` that matches `python/Cargo.toml` builds wheels for
-Linux, macOS and Windows and publishes them to PyPI
+A push to master that changes the version in `python/Cargo.toml` (or a
+tag `vX.Y.Z` matching it) builds wheels for Linux, macOS and Windows,
+publishes them to PyPI and creates the tag and GitHub release
 (`.github/workflows/release.yml`). x86-64 wheels target `x86-64-v3` (AVX2 +
 FMA) for the AVX2 kernels.
 
@@ -375,6 +469,7 @@ cargo run --release --example kernels -- 30 f32    # gate cost vs. one memory sw
 cargo run --release --example bench -- random 28 20 f32 4 14 --qasm /tmp/c.qasm
 cargo run --release --example shots -- 28 1000000
 cargo run --release --example stabilizer -- surface 101 101 10000 --qasm /tmp/s.qasm
+cargo run --release --example stabilizer -- surface 51 51 10000 --noise 0.001 --stim /tmp/s.stim
 cargo run --release --example mps -- random 64 20 256 1000 --qasm /tmp/m.qasm
 cargo run --release --example nearclifford -- 100 30 24 1000 --qasm /tmp/n.qasm
 cargo run --release --example pauliprop -- 20 0.4 Z62 1e-5 --qasm /tmp/k.qasm
@@ -386,6 +481,10 @@ python3 -m venv .bench-venv
 
 # Clifford circuits against Stim and Aer's stabilizer method:
 .bench-venv/bin/python benchmarks/compare_stim.py /tmp/s.qasm --shots 10000
+
+# Noisy surface codes against Stim, timing and detection statistics
+# (needs the Python package built with maturin, see below):
+.bench-venv/bin/python benchmarks/bench_noise.py     # -> results/noise*.csv
 
 # MPS circuits against Qiskit Aer and quimb (pip install quimb):
 .bench-venv/bin/python benchmarks/compare_mps.py /tmp/m.qasm --max-bond 256 --shots 1000
@@ -418,8 +517,9 @@ off). `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads.
    benchmarks on this machine is still to do.
 5. ~~OpenQASM input and Python bindings~~ (done: `qvd::qasm`, and the
    `qevedo-simulator` package in `python/`, imported as `qevedo.simulator`).
-6. Noise: Pauli noise channels fit the stabilizer and near-Clifford frame
-   samplers directly.
+6. ~~Noise~~ (done for the stabilizer backend: Stim's Pauli channels,
+   sampled with geometric gaps between errors); still to do on the
+   near-Clifford backend's frames, and Stim's detector annotations.
 
 ## License
 

@@ -4,7 +4,7 @@ import random
 
 import pytest
 
-from qevedo.simulator import Circuit, choose_backend, expectation, run, statevector
+from qevedo.simulator import Circuit, choose_backend, expectation, run, sample, statevector
 
 
 def probabilities(circuit):
@@ -256,3 +256,78 @@ def test_expectation_against_qiskit():
         want = Statevector(qc).expectation_value(operator).real
         got = expectation(qasm2.dumps(qc), operator, min_abs_coefficient=0)
         assert got.value == pytest.approx(want, abs=1e-9)
+
+
+def test_noise_channels_flip_at_their_rates():
+    pytest.importorskip("numpy")
+    n, shots = 200, 20_000
+    circuit = Circuit(n)
+    for q in range(0, n, 2):
+        circuit.x_error(q, 0.01).depolarize1(q + 1, 0.3)
+    circuit.measure_all()
+    assert circuit.has_noise() and choose_backend(circuit) == "stabilizer"
+    bits = sample(circuit, shots, seed=3)
+    assert bits.shape == (n, shots) and bits.dtype == bool
+    # A bit flip shows in Z with probability p; depolarizing in 2p/3.
+    for rows, p in ((bits[0::2], 0.01), (bits[1::2], 0.2)):
+        sigma = math.sqrt(p * (1 - p) / rows.size)
+        assert abs(rows.mean() - p) < 5 * sigma
+    packed = sample(circuit, shots, seed=3, bit_packed=True)
+    assert packed.shape == (n, (shots + 7) // 8)
+    import numpy as np
+
+    assert (np.unpackbits(packed, axis=1, count=shots, bitorder="little").astype(bool) == bits).all()
+    # Two-qubit depolarizing: each qubit of the pair flips in 8 of 15 cases.
+    pair = Circuit(2).depolarize2(0, 1, 0.75).measure_all()
+    flips = sample(pair, 60_000, seed=1).mean(axis=1)
+    assert abs(flips - 0.4).max() < 0.01
+    counts = run(pair, 10_000, seed=1).counts
+    assert set(counts) == {"00", "01", "10", "11"}
+
+
+def test_noise_errors_and_stim_text():
+    with pytest.raises(ValueError):
+        Circuit(1).x_error(0, 1.5)
+    with pytest.raises(ValueError):
+        Circuit(1).pauli_channel_1(0, 0.5, 0.4, 0.3)
+    with pytest.raises(ValueError):
+        Circuit(2).depolarize2(0, 0, 0.1)
+    noisy = Circuit(2).h(0).cx(0, 1).depolarize2(0, 1, 0.01).z_error(1, 0.02).measure_all()
+    for backend in ("statevector", "mps", "near_clifford"):
+        with pytest.raises(RuntimeError):
+            run(noisy, 10, backend=backend)
+    with pytest.raises(ValueError):
+        noisy.to_qasm()
+    assert noisy.instructions()[2:4] == [
+        ("depolarize2", [0, 1], [0.01]),
+        ("z_error", [1], [0.02]),
+    ]
+    assert noisy.to_stim() == "H 0\nCX 0 1\nDEPOLARIZE2(0.01) 0 1\nZ_ERROR(0.02) 1\nM 0 1\n"
+    with pytest.raises(ValueError):
+        sample(Circuit(1).t(0).measure_all(), 10)
+
+
+def test_noise_against_stim():
+    stim = pytest.importorskip("stim")
+    pytest.importorskip("numpy")
+    # A repetition code with noise everywhere: the same circuit in both
+    # simulators must give the same rate for every measurement parity.
+    circuit = Circuit(5)
+    clbit = 0
+    for _ in range(3):
+        for a in (1, 3):
+            circuit.reset(a).x_error(a, 0.02)
+        for a, b in ((0, 1), (2, 1), (2, 3), (4, 3)):
+            circuit.cx(a, b).depolarize2(a, b, 0.03)
+        for a in (1, 3):
+            circuit.x_error(a, 0.01).measure(a, clbit)
+            clbit += 1
+    shots = 100_000
+    measured = list(range(clbit))
+    ours = sample(circuit, shots, seed=2)
+    theirs = stim.Circuit(circuit.to_stim()).compile_sampler(seed=2).sample(shots).T
+    for i in range(2, len(measured)):
+        a = (ours[i] ^ ours[i - 2]).mean()
+        b = (theirs[i] ^ theirs[i - 2]).mean()
+        sigma = math.sqrt(max(a * (1 - a), 1e-9) * 2 / shots)
+        assert abs(a - b) < 5 * sigma, (i, a, b)
