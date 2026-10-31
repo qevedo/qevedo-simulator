@@ -48,10 +48,13 @@ from qevedo.simulator._native import (  # noqa: E402
     RunResult,
     __version__,
     choose_backend as _choose_backend,
+    circuit_from_stim as _circuit_from_stim,
     expectation as _expectation,
     run as _run,
     sample_bytes as _sample_bytes,
     statevector_bytes as _statevector_bytes,
+    stim_detector_bytes as _stim_detector_bytes,
+    stim_sample_bytes as _stim_sample_bytes,
     uses_avx2,
 )
 
@@ -61,6 +64,8 @@ __all__ = [
     "RunResult",
     "run",
     "sample",
+    "sample_detectors",
+    "from_stim",
     "statevector",
     "expectation",
     "choose_backend",
@@ -152,15 +157,84 @@ def sample(
     shape ``(num_clbits, shots)``, or with ``bit_packed=True`` a uint8
     array of shape ``(num_clbits, ceil(shots / 8))`` with shot ``s`` in
     bit ``s % 8`` of byte ``s // 8``. Needs NumPy.
+
+    ``circuit`` may also be Stim's text format or a ``stim.Circuit``:
+    measurement ``m`` is then row ``m``, and measurement flips (``M(p)``)
+    and inverted results (``M !q``) are applied. For detection events, see
+    ``sample_detectors``.
     """
     import numpy as np
 
-    circuit = _circuit(circuit)
-    raw = _sample_bytes(circuit, shots, seed=seed, threads=threads)
-    packed = np.frombuffer(raw, dtype=np.uint8).reshape(circuit.num_clbits, (shots + 7) // 8)
+    if _is_stim(circuit):
+        raw, rows = _stim_sample_bytes(str(circuit), shots, seed=seed, threads=threads)
+    else:
+        circuit = _circuit(circuit)
+        raw = _sample_bytes(circuit, shots, seed=seed, threads=threads)
+        rows = circuit.num_clbits
+    packed = np.frombuffer(raw, dtype=np.uint8).reshape(rows, (shots + 7) // 8)
     if bit_packed:
         return packed.copy()
     return np.unpackbits(packed, axis=1, count=shots, bitorder="little").astype(bool)
+
+
+def _is_stim(circuit) -> bool:
+    # A stim.Circuit, or text in Stim's format: OpenQASM ends every
+    # statement with ';', Stim never uses one.
+    if type(circuit).__module__.split(".")[0] == "stim":
+        return True
+    return isinstance(circuit, str) and ";" not in circuit
+
+
+def _stim_text(circuit) -> str:
+    if isinstance(circuit, Circuit):
+        return circuit.to_stim()
+    return str(circuit)
+
+
+def from_stim(text) -> tuple[Circuit, list[list[int]], list[list[int]]]:
+    """Read a circuit in Stim's format (text, or a ``stim.Circuit``).
+
+    Returns the ``Circuit`` (measurement ``m``, in Stim's order, is
+    classical bit ``m``; ``REPEAT`` blocks are unrolled), the detectors and
+    the observables, each a list of measurement indices. Fails on
+    instructions qvd cannot run, naming the line.
+    """
+    return _circuit_from_stim(str(text))
+
+
+def sample_detectors(
+    circuit,
+    shots: int,
+    *,
+    seed: int | None = None,
+    threads: int | str | None = None,
+    separate_observables: bool = True,
+):
+    """Detection events and observable flips of a noisy error-correction
+    circuit, as Stim's detector sampler returns them.
+
+    ``circuit`` is Stim's text format, a ``stim.Circuit`` (for example from
+    ``stim.Circuit.generated``), or a qvd ``Circuit`` (exported with
+    ``to_stim``, so without detectors). A detector fires when the parity of
+    its measurements differs from the noiseless circuit's.
+
+    The arrays are shot-major, as Stim's and as decoders take them
+    (``pymatching.Matching.decode_batch``): with ``separate_observables``
+    a pair ``(detectors, observables)`` of NumPy bool arrays of shapes
+    ``(shots, num_detectors)`` and ``(shots, num_observables)``; without,
+    one array with the observables appended after the detectors.
+    """
+    import numpy as np
+
+    raw_d, raw_o, nd, no = _stim_detector_bytes(
+        _stim_text(circuit), shots, seed=seed, threads=threads
+    )
+    # Shot-major bytes of 0 and 1 from Rust: a bool view, no copy.
+    detectors = np.frombuffer(raw_d, dtype=np.bool_).reshape(shots, nd)
+    observables = np.frombuffer(raw_o, dtype=np.bool_).reshape(shots, no)
+    if separate_observables:
+        return detectors, observables
+    return np.concatenate([detectors, observables], axis=1)
 
 
 def _terms(observable) -> list[tuple[str, float]]:

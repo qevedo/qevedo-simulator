@@ -306,6 +306,51 @@ return an error rather than ignore the channels. Against Stim (same file,
 detection rates agree within sampling error (`benchmarks/bench_noise.py`;
 README, "Noisy Clifford circuits").
 
+**Stim circuits and detectors** (`stim.rs`, `stabilizer::sample_detectors`).
+Error-correction circuits are written in Stim's format, with `DETECTOR`
+and `OBSERVABLE_INCLUDE` lines naming the measurements a decoder compares.
+`stim::parse` reads them into a `Circuit` with one classical bit per
+measurement, in Stim's `rec` order, unrolling `REPEAT` blocks, and keeps
+the detectors and observables as lists of measurements. Measurement and
+reset bases other than Z become basis changes around `M` and `R`
+(`MX` = H M H, `MY` = S† H M H S), so the sampler itself did not change.
+Anything it cannot run exactly (`MPP`, correlated or heralded errors,
+classically controlled gates, sweep bits) is an error naming the line,
+never skipped. Three details:
+- *Detection events are relative to the reference shot.* A detector fires
+  when its measurements' parity differs from the noiseless circuit's, as in
+  Stim. The sampler's reference shot is that noiseless run, so
+  `sample_detectors` XORs each detector's rows of the measurement record
+  and inverts the row when the reference parity is odd. Inverted results
+  (`M !q`) change a measurement and its reference alike and cancel.
+- *Measurement flips after the run.* `M(p)` flips the recorded result,
+  not the state. Each Stim measurement has its own classical bit and
+  nothing reads the record during the run, so the flips are drawn after
+  it, over all measurements with the same p as one run of Bernoulli
+  trials with geometric gaps (as the noise channels are). The frame loop
+  is untouched: noiseless and noisy benchmark circuits time the same as
+  before (interleaved best of 5–11, ratios 0.96–1.03).
+- *Shot-major output without a second copy.* Decoders take one row per
+  shot, so the detector rows are transposed into bytes. Detection events
+  are rare, so each 64-shot word is walked by its set bits
+  (`trailing_zeros`) into a zeroed block of `64 × detectors` bytes that
+  stays in cache, one rayon task per block. The Python binding writes
+  straight into the bytearray NumPy views: at d = 51 the result is
+  1.3 GB, and the NumPy unpack and transpose it replaced, or even one more
+  copy, cost as much as the sampling.
+
+Against Stim's detector sampler, on Stim's generated surface codes with
+p = 0.001 (10,000 shots, shot-major bool arrays from both, 4-vCPU VM):
+0.112 s against 0.359 s at d = 21 and 1.63 s against 9.92 s at d = 51
+(0.136 s and 2.32 s on one thread; Stim's better of plain and bit-packed
+output). At d = 51 on 4 threads, the Rust side splits into reading 0.09–0.10 s,
+sampling 0.71–0.77 s and the shot-major transpose 0.33–0.36 s (three runs
+of the `stabilizer` example's `detectors` mode on a file written by
+`stim.Circuit.generated`). Detection rates
+and decoded logical error rates agree with Stim's
+(`benchmarks/bench_detectors.py`; README, "Stim's circuits and detection
+events").
+
 **Correctness** (`tests/stabilizer.rs`): expectation values of random Pauli
 strings and deterministic measurement outcomes against the dense simulator
 on random Clifford circuits. Forced collapse outcomes are checked against
@@ -321,7 +366,16 @@ distribution summed over every combination of errors (5σ); flip rates of
 each channel on 300 qubits × 20,000 shots, so that gaps cross word and
 target boundaries; reproducibility across thread counts; surface-code
 detection rates growing linearly in p; and the Stim export. The Python
-tests compare a noisy repetition code with Stim directly.
+tests compare a noisy repetition code with Stim directly. The Stim reader
+(`tests/stim.rs`): blocks, records and annotations; errors naming the
+line; every gate against Stim's table of where it sends X and Z; each
+measurement and reset basis; detectors that never fire without noise,
+fire exactly where certain errors put them, fire at the rates measurement
+flips give by hand (5σ), and equal the parities of the raw records shot
+by shot; reproducibility across thread counts; and a round trip through
+`to_stim`. In Python, Stim's generated surface code (every detector and
+the observable, 5σ) and 100 random circuits of every gate (the same
+state as Stim's, up to a global phase).
 
 ## 8. Matrix product state backend (`mps/`)
 
@@ -672,11 +726,16 @@ remain (79 of its 87 s at 5 steps, θ_h = 1.2).
   that further when χ_max is far below the bond's rank. For 2D circuits,
   routing that also moves qubits apart again (or a 2D tensor network) would
   reduce the SWAPs.
-- **Noise beyond the stabilizer backend, and Stim's annotations.** The
+- **Noise beyond the stabilizer backend, and more of Stim's format.** The
   near-Clifford backend's per-shot frames could take Pauli noise the same
-  way. Stim's `DETECTOR` and `OBSERVABLE_INCLUDE` (and `M(p)`) are not
-  read or written; detectors are computed from the measurement records.
-  A Stim-format reader would let qvd run Stim's own generated circuits.
+  way. The Stim reader lacks `MPP`, `PAULI_CHANNEL_2`, correlated and
+  heralded errors, classical control from measurement records and sweep
+  bits, and `to_stim` does not write detectors. `sample_detectors` keeps
+  every measurement record in memory (one bit per measurement and shot)
+  before reducing them to detectors; bit-packed shot-major output, which
+  Stim offers, is not there yet. Sampling detectors directly, with a cost that
+  does not grow with the measurements (the Stim paper notes such a method
+  and that Stim does not implement it), is not done either.
 - **Fewer cache misses in the stabilizer reference shot.** Its gates are
   cache misses in a 208 MB tableau at d = 101. Storing each row's x and z
   words side by side would halve them. Random measurements (the first and

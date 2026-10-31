@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use num_complex::Complex64;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyByteArray, PyBytes};
 
 use qvd::threads::{Placement, pool};
 use qvd::{Backend, Circuit, Gate, Instruction, Matrix, Noise, Options};
@@ -674,20 +674,127 @@ fn sample_bytes<'py>(
         qvd::stabilizer::sample(&inner, shots, seed)
     })
     .map_err(value_error)?;
+    let bytes = rows_to_bytes(
+        (0..samples.num_clbits).map(|c| samples.clbit_words(c)),
+        shots,
+    );
+    Ok(PyBytes::new(py, &bytes))
+}
+
+/// Rows of bit-packed words (one per classical bit, detector or
+/// observable) as bytes, `ceil(shots / 8)` per row, with the bits past the
+/// last shot cleared.
+fn rows_to_bytes<'a>(rows: impl Iterator<Item = &'a [u64]>, shots: usize) -> Vec<u8> {
     let width = shots.div_ceil(8);
-    let mut bytes = Vec::with_capacity(samples.num_clbits * width);
-    for c in 0..samples.num_clbits {
+    let mut bytes = Vec::new();
+    for row in rows {
         let start = bytes.len();
-        for word in samples.clbit_words(c) {
+        for word in row {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
         bytes.truncate(start + width);
-        // Clear the unspecified bits past the last shot.
         if !shots.is_multiple_of(8) {
             bytes[start + width - 1] &= (1u8 << (shots % 8)) - 1;
         }
     }
-    Ok(PyBytes::new(py, &bytes))
+    bytes
+}
+
+/// Detection events and observable flips of a circuit in Stim's format,
+/// shot-major with one byte (0 or 1) per detector or observable, as two
+/// bytearrays, with the number of detectors and of observables; see
+/// `qevedo.simulator.sample_detectors`.
+#[pyfunction]
+#[pyo3(signature = (text, shots, seed = None, threads = None))]
+#[allow(clippy::type_complexity)]
+fn stim_detector_bytes<'py>(
+    py: Python<'py>,
+    text: &str,
+    shots: usize,
+    seed: Option<u64>,
+    threads: Option<&Bound<'py, PyAny>>,
+) -> PyResult<(
+    Bound<'py, PyByteArray>,
+    Bound<'py, PyByteArray>,
+    usize,
+    usize,
+)> {
+    let placement = parse_threads(threads)?;
+    let circuit = qvd::stim::parse(text).map_err(value_error)?;
+    let samples = compute(py, placement.clone(), move || {
+        qvd::stabilizer::sample_detectors(&circuit, shots, seed)
+    })
+    .map_err(value_error)?;
+    // Written straight into the bytearrays NumPy will view, without the GIL:
+    // nothing else can see them yet. A result of a gigabyte or more is
+    // common at large distances, and a second copy would cost as much as
+    // the sampling.
+    let fill = |len: usize, write: &(dyn Fn(&mut [u8]) + Sync)| {
+        PyByteArray::new_with(py, len, |buffer| {
+            compute(py, placement.clone(), || write(buffer));
+            Ok(())
+        })
+    };
+    let detectors = fill(shots * samples.num_detectors, &|b| {
+        samples.write_detectors_shot_major(b)
+    })?;
+    let observables = fill(shots * samples.num_observables, &|b| {
+        samples.write_observables_shot_major(b)
+    })?;
+    Ok((
+        detectors,
+        observables,
+        samples.num_detectors,
+        samples.num_observables,
+    ))
+}
+
+/// Measurement results of a circuit in Stim's format (with `M(p)` flips
+/// and inverted results applied), laid out as `sample_bytes`, with the
+/// number of measurements.
+#[pyfunction]
+#[pyo3(signature = (text, shots, seed = None, threads = None))]
+fn stim_sample_bytes<'py>(
+    py: Python<'py>,
+    text: &str,
+    shots: usize,
+    seed: Option<u64>,
+    threads: Option<&Bound<'py, PyAny>>,
+) -> PyResult<(Bound<'py, PyBytes>, usize)> {
+    let placement = parse_threads(threads)?;
+    let circuit = qvd::stim::parse(text).map_err(value_error)?;
+    let samples = compute(py, placement, move || {
+        qvd::stabilizer::sample_stim(&circuit, shots, seed)
+    })
+    .map_err(value_error)?;
+    let bytes = rows_to_bytes(
+        (0..samples.num_clbits).map(|c| samples.clbit_words(c)),
+        shots,
+    );
+    Ok((PyBytes::new(py, &bytes), samples.num_clbits))
+}
+
+/// A circuit in Stim's format as a `Circuit` (one classical bit per
+/// measurement, in Stim's order), with its detectors and observables as
+/// lists of measurement indices. Measurement flips (`M(p)`) and inverted
+/// results are not part of a `Circuit` and are rejected here.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn circuit_from_stim(text: &str) -> PyResult<(PyCircuit, Vec<Vec<usize>>, Vec<Vec<usize>>)> {
+    let circuit = qvd::stim::parse(text).map_err(value_error)?;
+    if !circuit.flips.is_empty() || !circuit.inverted.is_empty() {
+        return Err(value_error(
+            "measurement flips (M(p)) and inverted results (M !q, MPAD 1) have no Circuit \
+             form; use sample_detectors or sample on the Stim text",
+        ));
+    }
+    Ok((
+        PyCircuit {
+            inner: circuit.circuit,
+        },
+        circuit.detectors,
+        circuit.observables,
+    ))
 }
 
 /// The backend `run` would use for this circuit and these options.
@@ -728,6 +835,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(statevector_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(sample_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(stim_detector_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(stim_sample_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(circuit_from_stim, m)?)?;
     m.add_function(wrap_pyfunction!(choose_backend, m)?)?;
     m.add_function(wrap_pyfunction!(uses_avx2, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

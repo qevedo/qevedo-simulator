@@ -4,7 +4,16 @@ import random
 
 import pytest
 
-from qevedo.simulator import Circuit, choose_backend, expectation, run, sample, statevector
+from qevedo.simulator import (
+    Circuit,
+    choose_backend,
+    expectation,
+    from_stim,
+    run,
+    sample,
+    sample_detectors,
+    statevector,
+)
 
 
 def probabilities(circuit):
@@ -331,3 +340,91 @@ def test_noise_against_stim():
         b = (theirs[i] ^ theirs[i - 2]).mean()
         sigma = math.sqrt(max(a * (1 - a), 1e-9) * 2 / shots)
         assert abs(a - b) < 5 * sigma, (i, a, b)
+
+
+REPETITION = """\
+R 0 1 2 3 4
+REPEAT 4 {
+    X_ERROR(0.05) 0 2 4
+    CX 0 1 2 3
+    CX 2 1 4 3
+    MR(0.02) 1 3
+    DETECTOR rec[-2] rec[-4]
+    DETECTOR rec[-1] rec[-3]
+}
+M 0 2 4
+OBSERVABLE_INCLUDE(0) rec[-3]
+"""
+
+
+def test_from_stim_and_detector_shapes():
+    pytest.importorskip("numpy")
+    # The first round's detectors refer to measurements before the first.
+    with pytest.raises(ValueError, match="line 7"):
+        from_stim(REPETITION)
+    text = REPETITION.replace("REPEAT 4", "MR 1 3\nREPEAT 4")
+    with pytest.raises(ValueError, match="M\\(p\\)"):
+        from_stim(text)
+    circuit, detectors, observables = from_stim(text.replace("MR(0.02)", "MR"))
+    assert circuit.num_qubits == 5 and circuit.num_clbits == 2 + 8 + 3
+    assert detectors[:2] == [[2, 0], [3, 1]] and len(detectors) == 8
+    assert observables == [[10]]
+    dets, obs = sample_detectors(text, 1000, seed=1)
+    assert dets.shape == (1000, 8) and obs.shape == (1000, 1) and dets.dtype == bool
+    joined = sample_detectors(text, 1000, seed=1, separate_observables=False)
+    assert (joined[:, :8] == dets).all() and (joined[:, 8:] == obs).all()
+    # Raw records of Stim text, one row per measurement.
+    assert sample(text, 100, seed=1).shape == (13, 100)
+    # Without noise nothing fires.
+    quiet = text.replace("X_ERROR(0.05)", "X_ERROR(0)").replace("MR(0.02)", "MR")
+    dets, obs = sample_detectors(quiet, 500, seed=2)
+    assert not dets.any() and not obs.any()
+    with pytest.raises(ValueError, match="not supported"):
+        sample_detectors("MPP X0*X1\n", 10)
+
+
+def test_detectors_against_stim():
+    stim = pytest.importorskip("stim")
+    np = pytest.importorskip("numpy")
+    # Stim's generated surface code with every noise parameter on: the
+    # same rate for every detector and for the observable.
+    circuit = stim.Circuit.generated(
+        "surface_code:rotated_memory_x",
+        distance=3,
+        rounds=3,
+        after_clifford_depolarization=0.004,
+        before_measure_flip_probability=0.004,
+        after_reset_flip_probability=0.004,
+        before_round_data_depolarization=0.004,
+    )
+    shots = 100_000
+    ours = np.concatenate(sample_detectors(circuit, shots, seed=3), axis=1).mean(axis=0)
+    theirs = circuit.compile_detector_sampler(seed=3).sample(shots, append_observables=True).mean(axis=0)
+    assert ours.shape == theirs.shape
+    for i, (a, b) in enumerate(zip(ours, theirs)):
+        sigma = math.sqrt(max(a * (1 - a) + b * (1 - b), 1e-9) / shots)
+        assert abs(a - b) < 5 * sigma, (i, a, b)
+
+
+def test_stim_gates_against_stim_states():
+    stim = pytest.importorskip("stim")
+    np = pytest.importorskip("numpy")
+    # Every gate the reader knows, in random circuits from |000>: the same
+    # state as Stim's, up to a global phase.
+    one = "I X Y Z H H_XZ S SQRT_Z S_DAG SQRT_Z_DAG SQRT_X SQRT_X_DAG SQRT_Y SQRT_Y_DAG H_XY H_YZ C_XYZ C_ZYX".split()
+    two = "CX CNOT ZCX CY ZCY CZ ZCZ SWAP".split()
+    rng = random.Random(5)
+    for _ in range(100):
+        lines = ["I 0 1 2"]
+        for _ in range(12):
+            if rng.random() < 0.6:
+                lines.append(f"{rng.choice(one)} {rng.randrange(3)}")
+            else:
+                a, b = rng.sample(range(3), 2)
+                lines.append(f"{rng.choice(two)} {a} {b}")
+        text = "\n".join(lines)
+        circuit, _, _ = from_stim(text)
+        simulator = stim.TableauSimulator()
+        simulator.do(stim.Circuit(text))
+        expected = simulator.state_vector(endian="little")
+        assert abs(abs(np.vdot(expected, np.array(statevector(circuit)))) - 1) < 1e-5, text

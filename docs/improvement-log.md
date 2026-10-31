@@ -3,6 +3,93 @@
 One entry per improvement run: what changed, why, what it measured, and
 what to try next. Newest first.
 
+## 2026-10-31 — Stim's circuit format and detection events (0.1.3)
+
+**What.**
+- A new module, `src/stim.rs`: `qvd::stim::parse` reads Stim's circuit
+  format into a `StimCircuit`: the `Circuit` (one classical bit per
+  measurement, in Stim's `rec` order, `REPEAT` blocks unrolled), the
+  detectors and observables as lists of measurements, measurement flips
+  (`M(p)`, `MX(p)`, `MR(p)`, ...) and inverted results (`M !q`, `MPAD 1`).
+  It takes Stim's Clifford gates (including `SQRT_Y`, `H_XY`, `H_YZ`,
+  `C_XYZ`, `C_ZYX`), measurements and resets in every basis, the Pauli
+  channels, `DETECTOR`, `OBSERVABLE_INCLUDE`, and ignores coordinates and
+  `TICK`. Anything else is an error naming the line, never skipped.
+- `stabilizer::sample_detectors`: detection events and observable flips,
+  relative to the reference (noiseless) shot as in Stim, bit-packed, with
+  shot-major byte output (`detectors_shot_major`, written in parallel by
+  walking set bits). `stabilizer::sample_stim` returns the raw records with
+  flips and inversions. `M(p)` flips are drawn after the run with
+  geometric gaps; the frame loop did not change.
+- Python: `sample_detectors(circuit, shots)` takes Stim text, a
+  `stim.Circuit` or a qvd `Circuit`, and returns shot-major bool arrays as
+  Stim's detector sampler does (written straight into the buffer NumPy
+  views); `from_stim`; `sample` accepts Stim text.
+- The `stabilizer` example's `detectors <file> <shots>` mode, and
+  `benchmarks/bench_detectors.py`.
+
+**Why.** Item 1 of the previous entry's list, and what kept the noisy
+stabilizer backend from being used: error-correction work starts from
+Stim circuit files (Stim's generators and the tools built on them) and
+ends in a decoder that takes detection events. Before this run, qvd could
+sample a noisy circuit only after it had been rebuilt by hand in qvd's
+API, and the user then had to compute detectors from raw records. The
+method is Stim's (Gidney, *Quantum* 5, 497, 2021, arXiv:2103.02202). It
+could be checked end to end today: against Stim's own generated circuits,
+detector by detector and through the same decoder. A search of recent
+work turned up no published detector-sampling method that beats Stim's
+reference-plus-frames approach in practice, so matching Stim's interface
+at qvd's speed was the most useful step. The other candidates (noise on
+the near-Clifford frames, a compact Pauli-propagation store) improve
+features that fewer people use.
+
+**Measured** (4-vCPU Xeon VM at 2.1 GHz; `benchmarks/results/detectors*.csv`).
+Stim's generated rotated surface code, p = 0.001 on all four of its noise
+parameters, 10,000 shots, shot-major bool arrays from both:
+
+| d | qvd, 4 threads | qvd, 1 thread | Stim `sample` | Stim `sample(bit_packed=True)` |
+|---|---|---|---|---|
+| 11 | 0.015 s | 0.013 s | 0.049 s | 0.037 s |
+| 21 | 0.112 s | 0.136 s | 0.560 s | 0.359 s |
+| 51 | 1.63 s | 2.32 s | 9.92 s | 12.95 s |
+
+Detection rates agree (largest |z| 2.29–3.90 over 24–720 detectors,
+200,000 shots). The decoded logical error rates differed by 2.1–2.3
+standard errors in four of five codes, in both directions. A long run of
+the d = 3 code (24 million shots each, `--long`) found every detector and
+the observable in agreement (largest |z| 1.64). Calibrating by hand with
+one million shots at d = 5, p = 0.005 gave the same: qvd against Stim
+looked like Stim against Stim with another seed, pairwise detector
+correlations included (mean z² 0.96–0.99 for both). Existing benchmarks
+before and after, interleaved best of 5 (11 for the closest cases):
+ratios 0.96–1.03. The binaries changed only in the reference shot, which
+now also keeps each classical bit's reference value.
+
+**Learned.**
+- The first Python version unpacked bits with NumPy and transposed them.
+  That took 0.69 s at d = 21, slower than Stim's 0.52 s, although the
+  sampling itself took 0.09 s. Writing the shot-major bytes in Rust, then
+  straight into the bytearray NumPy views without a second copy, gave
+  0.11 s. At d = 51 the result is 1.3 GB, so one copy costs about as much
+  as the sampling.
+- `qevedo.simulator.sample` has the same problem in measurement-major form:
+  12 s at d = 51 for Stim text, where the sampling takes under a second;
+  the rest goes to unpacking and converting 1.4 billion bits with NumPy.
+  It is not changed here.
+- Stim's generated circuits put measurement noise in an `X_ERROR` before
+  `M`, not `M(p)`. `M(p)` is tested separately (rates by hand in Rust; a
+  d = 5 code rewritten with `MR(0.01)` and `MX(0.02)`, 2 million shots,
+  against Stim).
+
+**Next.**
+1. Fast output for `sample` (measurement-major) and bit-packed shot-major
+   output for `sample_detectors`, both written by Rust into the NumPy
+   buffer.
+2. Noise on the near-Clifford backend's per-shot frames (noisy
+   magic-state circuits).
+3. `to_stim` writing detectors and observables, and `MPP` and
+   `PAULI_CHANNEL_2` in the reader.
+
 ## 2026-10-29 — Pauli noise in the stabilizer backend (0.1.2)
 
 **What.** Pauli noise channels, sampled independently in every shot:

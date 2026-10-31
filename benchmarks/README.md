@@ -96,6 +96,21 @@ each detector fires (XOR of consecutive measurements of one ancilla),
 qvd through the Python package against Stim's sampler, 200,000 shots each,
 with a two-sample z-score per detector.
 
+## Stim circuits and detection events
+
+Stim's own generated circuits (`surface_code:rotated_memory_z`, d rounds,
+all four noise parameters at p = 0.001), read by qvd's Stim reader, against
+Stim's detector sampler, 10,000 shots (`detectors.csv`). Measured on a
+4-vCPU Xeon virtual machine (`detectors_machine` in `machine.json`). Both
+run in one Python process and return shot-major NumPy bool arrays; qvd on
+4 threads and on 1, its time including reading the text; Stim on one
+thread, with and without `bit_packed=True`; best of 3. Distance 101 is
+left out: a shot-major result of a million detectors × 10,000 shots is
+10 GB in either simulator. `detectors_agreement.csv` compares detection
+rates (200,000 shots, a two-sample z-score per detector) and the logical
+error rates after the same PyMatching decoder; `detectors_long.csv` repeats
+the smallest code with 24 million shots per simulator, per detector.
+
 ## Matrix product states
 
 ![MPS benchmark](charts/mps.svg)
@@ -156,6 +171,11 @@ cargo build --release --example stabilizer
 (cd python && maturin develop --release)
 .bench-venv/bin/python benchmarks/bench_noise.py
 
+# Detection events of Stim's generated circuits against Stim
+# (pip install pymatching; the Python package built as above).
+.bench-venv/bin/python benchmarks/bench_detectors.py --distances 11,21,51
+.bench-venv/bin/python benchmarks/bench_detectors.py --long
+
 # MPS: 64 qubits, depth 20, χ ≤ 256, 1000 shots.
 cargo run --release --example mps -- random 64 20 256 1000 --qasm /tmp/m.qasm
 .bench-venv/bin/python benchmarks/compare_mps.py /tmp/m.qasm --max-bond 256 --shots 1000
@@ -178,7 +198,9 @@ cargo build --release --example pauliprop
 off); `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads. The
 `stabilizer` example takes `surface <distance> <rounds> <shots>` or
 `random <qubits> <depth> <shots>`, with `--noise P` for depolarizing noise
-and `--stim FILE` to write the circuit in Stim's format;
+and `--stim FILE` to write the circuit in Stim's format, or
+`detectors <Stim file> <shots>` to time reading a Stim file, sampling its
+detectors and making them shot-major;
 `QVD_THREADS=pcores|all|<n>` selects the threads (P-cores by default). The `mps` example takes
 `<random|grid|qft|ghz> <qubits | ROWSxCOLS> <depth> <max bond> [shots]`, and
 the `nearclifford` example `<qubits> <depth> <T count> [shots] [--backend nc|sv|mps]`,

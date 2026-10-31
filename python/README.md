@@ -53,6 +53,30 @@ bits = sample(c, 100_000, seed=1)        # NumPy bool array, (10, 100000)
 print(c.to_stim().splitlines()[:3])      # ['R 1', 'X_ERROR(0.001) 1', 'CX 0 1']
 ```
 
+Error-correction circuits written in Stim's format (text or a
+`stim.Circuit`, for example from `stim.Circuit.generated`) run directly.
+`sample_detectors` returns detection events and observable flips,
+shot-major as Stim's detector sampler returns them and as decoders take
+them; `from_stim` gives the `Circuit` with its detectors and observables
+as lists of measurement indices, and `sample` takes Stim text too:
+
+```python
+import pymatching, stim
+from qevedo.simulator import sample_detectors
+
+circuit = stim.Circuit.generated("surface_code:rotated_memory_z", distance=5, rounds=5,
+                                 after_clifford_depolarization=0.003)
+detectors, observables = sample_detectors(circuit, 100_000, seed=1)  # (100000, 120), (100000, 1)
+matching = pymatching.Matching.from_detector_error_model(circuit.detector_error_model(decompose_errors=True))
+logical_error_rate = (matching.decode_batch(detectors) != observables).any(axis=1).mean()
+```
+
+The reader takes Stim's Clifford gates, `M`/`MX`/`MY`/`MR`/`MRX`/`MRY`
+with measurement-flip probabilities (`M(0.01)`) and inverted targets
+(`M !3`), `R`/`RX`/`RY`, `MPAD`, the Pauli channels, `DETECTOR`,
+`OBSERVABLE_INCLUDE` and nested `REPEAT` blocks; anything else (`MPP`,
+correlated errors, classical control, ...) is an error naming the line.
+
 `run` chooses the simulation method automatically:
 
 | Backend | For | Scale on one workstation |

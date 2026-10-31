@@ -23,7 +23,10 @@ faster at this size, and within 1.3× of Stim at d = 11 and 21). It also samples
 noise (Stim's channels, independently in every shot), which error-correction
 studies need: the same distance-101 code with circuit-level depolarizing
 noise samples 10,000 shots in 6.0 s on a 4-vCPU virtual machine, where
-Stim takes 37.5 s, with the same detection statistics. Other circuits too large
+Stim takes 37.5 s, with the same detection statistics. Stim's own
+circuit files run directly, detectors included: detection events of
+Stim's generated distance-51 surface code come out 6.1× faster than from
+Stim's detector sampler (4.3× on one thread). Other circuits too large
 for a state vector run on a matrix product state backend, exact while the
 entanglement is low and approximate, with a fidelity estimate, beyond: it is
 1.6–14× faster than the faster of Qiskit Aer's and quimb's MPS simulators on
@@ -171,11 +174,59 @@ which is what chance gives over 288 detectors. The tests also check
 sampled distributions against exact ones summed over every combination of
 errors.
 
-What is not there yet: Stim's `DETECTOR` and `OBSERVABLE_INCLUDE`
-annotations (detectors are XORs of the returned measurement records, which
-`qevedo.simulator.sample` gives as a NumPy array), measurement-flip
-arguments such as `M(p)` (use a bit flip before the measurement), and noise
-on the other backends.
+### Stim's circuits and detection events
+
+Decoders do not take measurement records but detection events: which
+detectors (parities of measurements that are fixed without noise) fired,
+and whether the logical observable flipped. qvd reads Stim's circuit
+format with its `DETECTOR` and `OBSERVABLE_INCLUDE` annotations, `REPEAT`
+blocks and measurement-flip probabilities (`M(p)`), and samples detection
+events as Stim's detector sampler does, so Stim's own generated circuits
+and the tools around them run unchanged.
+
+Stim's `surface_code:rotated_memory_z`, d rounds, with all four of its
+noise parameters at p = 0.001, 10,000 shots, the same text in both. Both
+return shot-major NumPy bool arrays (detectors, observables), in one
+Python process; qvd's time includes reading the text, and Stim's
+compiling its sampler. Measured on a 4-vCPU Xeon virtual machine
+(2.1 GHz, not the one of the table above); Stim is single-threaded.
+
+| Distance | Qubits | Detectors | qvd, 4 vCPUs | qvd, 1 thread | Stim 1.16 `compile_detector_sampler().sample` | Same, `bit_packed=True` |
+|---|---|---|---|---|---|---|
+| 11 | 274 | 1,320 | 0.015 s | **0.013 s** | 0.049 s | 0.037 s |
+| 21 | 944 | 9,240 | **0.112 s** | 0.136 s | 0.560 s | 0.359 s |
+| 51 | 5,354 | 132,600 | **1.63 s** | 2.32 s | 9.92 s | 12.95 s |
+
+qvd is 2.6–4.3× faster than the faster of Stim's two outputs on one
+thread, and 3.2–6.1× on 4 vCPUs from d = 21 up. Distance 101 is left out:
+its shot-major result alone is 10 GB in either simulator, on a 15 GB
+machine. qvd has no bit-packed shot-major output yet.
+
+The statistics agree. 200,000 shots of each code, decoded by the same
+PyMatching decoder (built from Stim's detector error model),
+`benchmarks/bench_detectors.py`:
+
+| Code | p | Detectors | Detection rate, qvd / Stim | Largest \|z\| over detectors | Logical error rate, qvd / Stim | \|z\| |
+|---|---|---|---|---|---|---|
+| d = 3, 3 rounds | 0.001 | 24 | 0.012322 / 0.012200 | 2.29 | 0.000825 / 0.000635 | 2.22 |
+| d = 5, 5 rounds | 0.001 | 120 | 0.014646 / 0.014570 | 2.95 | 0.000145 / 0.000075 | 2.11 |
+| d = 5, 5 rounds | 0.005 | 120 | 0.069166 / 0.069051 | 2.69 | 0.014225 / 0.014435 | 0.56 |
+| d = 7, 7 rounds | 0.003 | 336 | 0.046054 / 0.046134 | 3.02 | 0.001200 / 0.001465 | 2.30 |
+| d = 9, 9 rounds | 0.005 | 720 | 0.077522 / 0.077548 | 3.90 | 0.007065 / 0.006460 | 2.33 |
+
+Four of the five logical error rates differ by more than two standard
+errors, in both directions, which is more than chance usually gives. So
+the smallest code was run again with 24 million shots in each simulator
+(six seeds, `--long`): every detector and the observable agree, the
+largest |z| is 1.64 (`results/detectors_long.csv`). The tests also check
+every gate against Stim's states, each measurement basis and `M(p)`
+against rates computed by hand, and detection events against the raw
+measurement records shot by shot.
+
+What is not there yet: `MPP`, correlated and heralded errors, classically
+controlled gates and sweep bits in the reader (each is an error naming
+the line, never skipped), writing detectors in `to_stim`, and noise on the
+other backends.
 
 ### Low-entanglement circuits (MPS)
 
@@ -350,6 +401,20 @@ for _ in range(10):                      # a small repetition code
 bits = sample(c, 100_000, seed=1)        # NumPy bool array, (10, 100000)
 ```
 
+Circuits in Stim's format, with their `DETECTOR` and
+`OBSERVABLE_INCLUDE` annotations, run directly: `sample_detectors` returns
+detection events and observable flips, shot-major as Stim's detector
+sampler and decoders such as PyMatching use them:
+
+```python
+import stim
+from qevedo.simulator import sample_detectors
+
+circuit = stim.Circuit.generated("surface_code:rotated_memory_z", distance=5, rounds=5,
+                                 after_clifford_depolarization=0.003)
+detectors, observables = sample_detectors(circuit, 100_000, seed=1)  # (100000, 120), (100000, 1)
+```
+
 See [python/README.md](python/README.md). The bindings are a PyO3 module
 built with maturin; simulations release the GIL.
 
@@ -419,6 +484,19 @@ let samples = qvd::stabilizer::sample(&circuit, 100_000, Some(1)).unwrap();
 std::fs::write("d25.stim", qvd::stabilizer::to_stim(&circuit).unwrap()).unwrap();
 ```
 
+`qvd::stim::parse` reads Stim's format (Clifford gates, `M`/`MX`/`MY`/`MR`
+with measurement-flip probabilities, resets, Pauli channels, `DETECTOR`,
+`OBSERVABLE_INCLUDE`, `REPEAT`), and `stabilizer::sample_detectors` samples
+its detection events:
+
+```rust
+let text = std::fs::read_to_string("surface_code.stim").unwrap();
+let circuit = qvd::stim::parse(&text).unwrap();
+let samples = qvd::stabilizer::sample_detectors(&circuit, 100_000, Some(1)).unwrap();
+let fired = samples.detector(0, 3);            // shot 0, detector 3
+let shot_major = samples.detectors_shot_major(); // one byte per detector and shot
+```
+
 Expectation values come from `qvd::pauliprop::expectation`, for unitary
 circuits of any gates except two- and more-qubit `Unitary` matrices:
 
@@ -470,6 +548,7 @@ cargo run --release --example bench -- random 28 20 f32 4 14 --qasm /tmp/c.qasm
 cargo run --release --example shots -- 28 1000000
 cargo run --release --example stabilizer -- surface 101 101 10000 --qasm /tmp/s.qasm
 cargo run --release --example stabilizer -- surface 51 51 10000 --noise 0.001 --stim /tmp/s.stim
+cargo run --release --example stabilizer -- detectors /tmp/d.stim 10000   # a Stim file's detectors
 cargo run --release --example mps -- random 64 20 256 1000 --qasm /tmp/m.qasm
 cargo run --release --example nearclifford -- 100 30 24 1000 --qasm /tmp/n.qasm
 cargo run --release --example pauliprop -- 20 0.4 Z62 1e-5 --qasm /tmp/k.qasm
@@ -485,6 +564,10 @@ python3 -m venv .bench-venv
 # Noisy surface codes against Stim, timing and detection statistics
 # (needs the Python package built with maturin, see below):
 .bench-venv/bin/python benchmarks/bench_noise.py     # -> results/noise*.csv
+
+# Detection events of Stim's generated circuits against Stim's detector
+# sampler, with decoded logical error rates (pip install pymatching):
+.bench-venv/bin/python benchmarks/bench_detectors.py  # -> results/detectors*.csv
 
 # MPS circuits against Qiskit Aer and quimb (pip install quimb):
 .bench-venv/bin/python benchmarks/compare_mps.py /tmp/m.qasm --max-bond 256 --shots 1000
@@ -518,8 +601,9 @@ off). `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads.
 5. ~~OpenQASM input and Python bindings~~ (done: `qvd::qasm`, and the
    `qevedo-simulator` package in `python/`, imported as `qevedo.simulator`).
 6. ~~Noise~~ (done for the stabilizer backend: Stim's Pauli channels,
-   sampled with geometric gaps between errors); still to do on the
-   near-Clifford backend's frames, and Stim's detector annotations.
+   sampled with geometric gaps between errors, and Stim's format with its
+   detector annotations); still to do on the near-Clifford backend's
+   frames.
 
 ## License
 

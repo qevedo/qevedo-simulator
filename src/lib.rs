@@ -22,6 +22,7 @@ pub mod simd;
 pub mod simulator;
 pub mod stabilizer;
 pub mod state;
+pub mod stim;
 pub mod threads;
 
 pub use circuit::{Circuit, Gate, Instruction, Noise};

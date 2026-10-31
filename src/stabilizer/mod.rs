@@ -565,10 +565,24 @@ impl Shared {
 /// parallel and in cache. Noise channels are sampled independently in every
 /// shot. Fails if the circuit contains a non-Clifford gate.
 pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samples, String> {
-    let mut rng = match seed {
+    sample_with_reference(circuit, shots, &mut seeded(seed)).map(|(samples, _)| samples)
+}
+
+fn seeded(seed: Option<u64>) -> Pcg64 {
+    match seed {
         Some(seed) => Pcg64::seed_from_u64(seed),
         None => Pcg64::from_rng(&mut rand::rng()),
-    };
+    }
+}
+
+/// [`sample`], also returning the reference shot: the last result written
+/// to each classical bit in the noiseless run on the tableau.
+fn sample_with_reference(
+    circuit: &Circuit,
+    shots: usize,
+    rng: &mut Pcg64,
+) -> Result<(Samples, Vec<bool>), String> {
+    let mut reference_bits = vec![false; circuit.num_clbits];
     let n = circuit.num_qubits;
     // Reference shot, with gates on disjoint qubits applied in parallel.
     let mut tableau = Tableau::new(n);
@@ -594,7 +608,8 @@ pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samp
             Instruction::Measure { qubit, clbit } => {
                 pending.before([*qubit], &mut steps, &mut noises, &mut noise_targets);
                 layer.flush(&mut tableau);
-                let reference = tableau.measure(*qubit, &mut rng);
+                let reference = tableau.measure(*qubit, rng);
+                reference_bits[*clbit] = reference;
                 steps.push(Step::Measure {
                     qubit: *qubit,
                     clbit: *clbit,
@@ -604,7 +619,7 @@ pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samp
             Instruction::Reset { qubit } => {
                 pending.before([*qubit], &mut steps, &mut noises, &mut noise_targets);
                 layer.flush(&mut tableau);
-                tableau.reset(*qubit, &mut rng);
+                tableau.reset(*qubit, rng);
                 steps.push(Step::Reset { qubit: *qubit });
             }
             Instruction::Barrier { .. } => {}
@@ -666,12 +681,232 @@ pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samp
             }
         });
     }
-    Ok(Samples {
+    let samples = Samples {
         shots,
         num_clbits: circuit.num_clbits,
         words,
         bits,
+    };
+    Ok((samples, reference_bits))
+}
+
+/// Detection events and observable flips of many shots, bit-packed as
+/// [`Samples`] is: one row of `ceil(shots / 64)` words per detector and
+/// per observable.
+#[derive(Clone, Debug)]
+pub struct DetectorSamples {
+    pub shots: usize,
+    pub num_detectors: usize,
+    pub num_observables: usize,
+    words: usize,
+    /// Detector `d` of shot `s` is bit `s % 64` of `detectors[d * words + s / 64]`.
+    detectors: Vec<u64>,
+    observables: Vec<u64>,
+}
+
+impl DetectorSamples {
+    /// Whether detector `detector` fired in shot `shot`.
+    pub fn detector(&self, shot: usize, detector: usize) -> bool {
+        assert!(shot < self.shots && detector < self.num_detectors);
+        (self.detectors[detector * self.words + shot / 64] >> (shot % 64)) & 1 == 1
+    }
+
+    /// Whether observable `observable` flipped in shot `shot`.
+    pub fn observable(&self, shot: usize, observable: usize) -> bool {
+        assert!(shot < self.shots && observable < self.num_observables);
+        (self.observables[observable * self.words + shot / 64] >> (shot % 64)) & 1 == 1
+    }
+
+    /// The shots of detector `detector`, 64 per word (bits past `shots` in
+    /// the last word are zero).
+    pub fn detector_words(&self, detector: usize) -> &[u64] {
+        &self.detectors[detector * self.words..(detector + 1) * self.words]
+    }
+
+    /// The shots of observable `observable`, 64 per word (bits past
+    /// `shots` in the last word are zero).
+    pub fn observable_words(&self, observable: usize) -> &[u64] {
+        &self.observables[observable * self.words..(observable + 1) * self.words]
+    }
+
+    /// The detection events shot-major, one byte (0 or 1) per detector:
+    /// byte `s * num_detectors + d` is detector `d` of shot `s`. This is
+    /// the layout of Stim's detector sampler and of decoders' batch input.
+    pub fn detectors_shot_major(&self) -> Vec<u8> {
+        let mut out = vec![0; self.shots * self.num_detectors];
+        self.write_detectors_shot_major(&mut out);
+        out
+    }
+
+    /// The observable flips shot-major, as [`Self::detectors_shot_major`].
+    pub fn observables_shot_major(&self) -> Vec<u8> {
+        let mut out = vec![0; self.shots * self.num_observables];
+        self.write_observables_shot_major(&mut out);
+        out
+    }
+
+    /// [`Self::detectors_shot_major`] into a buffer of
+    /// `shots * num_detectors` bytes (a NumPy array's, say).
+    pub fn write_detectors_shot_major(&self, out: &mut [u8]) {
+        shot_major(
+            &self.detectors,
+            self.num_detectors,
+            self.words,
+            self.shots,
+            out,
+        );
+    }
+
+    /// [`Self::observables_shot_major`] into a buffer of
+    /// `shots * num_observables` bytes.
+    pub fn write_observables_shot_major(&self, out: &mut [u8]) {
+        shot_major(
+            &self.observables,
+            self.num_observables,
+            self.words,
+            self.shots,
+            out,
+        );
+    }
+}
+
+/// Transpose `count` bit-packed rows of `words` words into `shots` rows of
+/// `count` bytes in `out`.
+///
+/// Detection events are rare, so this walks the set bits of each word
+/// (`trailing_zeros`) rather than every bit. Each block of 64 shots is one
+/// task, which zeroes its own `64 * count` bytes and then sets its ones
+/// while they are in cache (and, for a fresh allocation, touches its pages
+/// first, in parallel).
+fn shot_major(rows: &[u64], count: usize, words: usize, shots: usize, out: &mut [u8]) {
+    assert_eq!(out.len(), shots * count);
+    if count == 0 {
+        return;
+    }
+    out.par_chunks_mut(64 * count)
+        .enumerate()
+        .for_each(|(w, block)| {
+            block.fill(0);
+            for r in 0..count {
+                let mut word = rows[r * words + w];
+                while word != 0 {
+                    let bit = word.trailing_zeros() as usize;
+                    block[bit * count + r] = 1;
+                    word &= word - 1;
+                }
+            }
+        });
+}
+
+/// Measurement results of a circuit read from Stim's format, with its
+/// measurement flips (`M(p)`) and inverted results (`M !q`) applied.
+/// Measurement `m` is classical bit `m`.
+pub fn sample_stim(
+    circuit: &crate::stim::StimCircuit,
+    shots: usize,
+    seed: Option<u64>,
+) -> Result<Samples, String> {
+    let mut rng = seeded(seed);
+    let (mut samples, _) = sample_with_reference(&circuit.circuit, shots, &mut rng)?;
+    flip_records(&mut samples, circuit, &mut rng);
+    for &m in &circuit.inverted {
+        for word in &mut samples.bits[m * samples.words..(m + 1) * samples.words] {
+            *word = !*word;
+        }
+    }
+    Ok(samples)
+}
+
+/// Sample detection events and observable flips of a circuit read from
+/// Stim's format, as Stim's detector sampler does.
+///
+/// A detector fires when the parity of its measurements differs from the
+/// parity in the noiseless circuit; an observable flips likewise. The
+/// noiseless parities come from the reference shot, so detectors must be
+/// deterministic without noise (as in every error-correction circuit;
+/// a detector that is not is random, as in Stim). Inverted results
+/// (`M !q`) change a measurement and its reference alike and so cancel.
+pub fn sample_detectors(
+    circuit: &crate::stim::StimCircuit,
+    shots: usize,
+    seed: Option<u64>,
+) -> Result<DetectorSamples, String> {
+    let mut rng = seeded(seed);
+    let (mut samples, reference) = sample_with_reference(&circuit.circuit, shots, &mut rng)?;
+    flip_records(&mut samples, circuit, &mut rng);
+    let words = samples.words;
+    // Parities relative to the reference, one row of words each.
+    let parities = |groups: &[Vec<usize>]| {
+        let mut out = vec![0u64; groups.len() * words];
+        out.par_chunks_mut(words.max(1))
+            .zip(groups)
+            .for_each(|(row, group)| {
+                let mut flipped = false;
+                for &m in group {
+                    flipped ^= reference[m];
+                    for (a, b) in row.iter_mut().zip(samples.clbit_words(m)) {
+                        *a ^= b;
+                    }
+                }
+                if flipped {
+                    for a in row.iter_mut() {
+                        *a = !*a;
+                    }
+                }
+                // Zero the bits past the last shot.
+                if !shots.is_multiple_of(64) {
+                    if let Some(last) = row.last_mut() {
+                        *last &= (1u64 << (shots % 64)) - 1;
+                    }
+                }
+            });
+        out
+    };
+    Ok(DetectorSamples {
+        shots,
+        num_detectors: circuit.detectors.len(),
+        num_observables: circuit.observables.len(),
+        words,
+        detectors: parities(&circuit.detectors),
+        observables: parities(&circuit.observables),
     })
+}
+
+/// Flip each recorded result of `circuit.flips` with its probability,
+/// independently in every shot. A flip of the record leaves the state
+/// alone, so it can be applied after the run: each measurement of a Stim
+/// circuit has its own classical bit.
+///
+/// The measurements with the same probability form one run of
+/// `measurements * shots` Bernoulli trials, and the gaps between flips are
+/// drawn (geometrically distributed), as the noise channels do: about
+/// `1 + measurements * shots * p` draws instead of one per shot.
+fn flip_records(samples: &mut Samples, circuit: &crate::stim::StimCircuit, rng: &mut Pcg64) {
+    let mut groups: Vec<(f64, Vec<usize>)> = Vec::new();
+    for &(m, p) in &circuit.flips {
+        match groups.iter_mut().find(|(q, _)| *q == p) {
+            Some((_, ms)) => ms.push(m),
+            None => groups.push((p, vec![m])),
+        }
+    }
+    let (shots, words) = (samples.shots, samples.words);
+    for (p, measurements) in groups {
+        let trials = measurements.len() * shots;
+        let log_miss = (-p).ln_1p();
+        let mut next = 0usize;
+        loop {
+            if log_miss > f64::NEG_INFINITY {
+                let u = 1.0 - rng.random::<f64>();
+                next = next.saturating_add((u.ln() / log_miss) as usize);
+            }
+            if next >= trials {
+                break;
+            }
+            let (m, shot) = (measurements[next / shots], next % shots);
+            samples.bits[m * words + shot / 64] ^= 1u64 << (shot % 64);
+            next += 1;
+        }
+    }
 }
 
 /// The circuit in Stim's format, so Stim can sample exactly the same noisy

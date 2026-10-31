@@ -1,0 +1,13 @@
+distance,rounds,qubits,detectors,measurements,p,shots,simulator,method,version,threads,seconds
+11,11,274,1320,1441,0.001,10000,qvd,sample_detectors,0.1.2,4,0.015
+11,11,274,1320,1441,0.001,10000,qvd,sample_detectors,0.1.2,1,0.013
+11,11,274,1320,1441,0.001,10000,stim,compile_detector_sampler().sample,1.16.0,1,0.049
+11,11,274,1320,1441,0.001,10000,stim,compile_detector_sampler().sample(bit_packed=True),1.16.0,1,0.037
+21,21,944,9240,9681,0.001,10000,qvd,sample_detectors,0.1.2,4,0.112
+21,21,944,9240,9681,0.001,10000,qvd,sample_detectors,0.1.2,1,0.136
+21,21,944,9240,9681,0.001,10000,stim,compile_detector_sampler().sample,1.16.0,1,0.560
+21,21,944,9240,9681,0.001,10000,stim,compile_detector_sampler().sample(bit_packed=True),1.16.0,1,0.359
+51,51,5354,132600,135201,0.001,10000,qvd,sample_detectors,0.1.2,4,1.626
+51,51,5354,132600,135201,0.001,10000,qvd,sample_detectors,0.1.2,1,2.319
+51,51,5354,132600,135201,0.001,10000,stim,compile_detector_sampler().sample,1.16.0,1,9.919
+51,51,5354,132600,135201,0.001,10000,stim,compile_detector_sampler().sample(bit_packed=True),1.16.0,1,12.950
