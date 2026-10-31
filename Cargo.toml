@@ -1,6 +1,6 @@
 [package]
 name = "qvd"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.87"
 description = "A fast quantum circuit simulator: an AVX2 state vector built for memory bandwidth, a stabilizer backend for Clifford circuits and a matrix product state backend for low entanglement"
