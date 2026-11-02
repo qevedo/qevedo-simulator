@@ -328,3 +328,75 @@ fn round_trip_through_to_stim() {
         assert_eq!(a.clbit_words(c), b.clbit_words(c), "classical bit {c}");
     }
 }
+
+#[test]
+fn every_output_layout_holds_the_same_bits() {
+    // The byte layouts handed to NumPy (measurement-major records, bool and
+    // bit-packed; shot-major detection events, bool, bit-packed and with the
+    // observables appended) against the samples read bit by bit. Shot
+    // counts that are not multiples of 8 or 64, and a detector count that
+    // is not a multiple of 8, exercise the padding.
+    let text =
+        repetition_code(6, 5, 0.05, 0.05).replace("CX 0 1\n", "CX 0 1\nDEPOLARIZE2(0.05) 0 1\n");
+    let c = parse(&text).unwrap();
+    for shots in [1, 7, 64, 100, 1000] {
+        let records = sample_stim(&c, shots, Some(11)).unwrap();
+        let (m, width) = (records.num_clbits, shots.div_ceil(8));
+        let mut bytes = vec![7; m * shots];
+        records.write_bytes(&mut bytes);
+        let mut packed = vec![7; m * width];
+        records.write_packed(&mut packed);
+        for clbit in 0..m {
+            for shot in 0..shots {
+                let bit = records.get(shot, clbit);
+                assert_eq!(bytes[clbit * shots + shot], bit as u8, "{shots} shots");
+                assert_eq!(
+                    (packed[clbit * width + shot / 8] >> (shot % 8)) & 1,
+                    bit as u8
+                );
+            }
+            if shots % 8 != 0 {
+                assert_eq!(packed[clbit * width + width - 1] >> (shots % 8), 0);
+            }
+        }
+
+        let samples = sample_detectors(&c, shots, Some(11)).unwrap();
+        let (nd, no) = (samples.num_detectors, samples.num_observables);
+        assert_ne!(nd % 8, 0, "the test needs a partly filled byte");
+        let (wd, wo, wj) = (nd.div_ceil(8), no.div_ceil(8), (nd + no).div_ceil(8));
+        let mut d_packed = vec![7; shots * wd];
+        samples.write_detectors_shot_major_packed(&mut d_packed);
+        let mut o_packed = vec![7; shots * wo];
+        samples.write_observables_shot_major_packed(&mut o_packed);
+        let mut joined = vec![7; shots * (nd + no)];
+        samples.write_shot_major(false, &mut joined);
+        let mut joined_packed = vec![7; shots * wj];
+        samples.write_shot_major(true, &mut joined_packed);
+        let bytes = samples.detectors_shot_major();
+        let packed_bit = |buffer: &[u8], width: usize, shot: usize, r: usize| {
+            (buffer[shot * width + r / 8] >> (r % 8)) & 1 == 1
+        };
+        for shot in 0..shots {
+            for d in 0..nd {
+                let bit = samples.detector(shot, d);
+                assert_eq!(bytes[shot * nd + d] == 1, bit);
+                assert_eq!(packed_bit(&d_packed, wd, shot, d), bit, "detector {d}");
+                assert_eq!(joined[shot * (nd + no) + d] == 1, bit);
+                assert_eq!(packed_bit(&joined_packed, wj, shot, d), bit);
+            }
+            for o in 0..no {
+                let bit = samples.observable(shot, o);
+                assert_eq!(packed_bit(&o_packed, wo, shot, o), bit);
+                assert_eq!(joined[shot * (nd + no) + nd + o] == 1, bit);
+                assert_eq!(packed_bit(&joined_packed, wj, shot, nd + o), bit);
+            }
+            // Padding bits are zero.
+            assert_eq!(d_packed[shot * wd + wd - 1] >> (nd % 8), 0);
+            if (nd + no) % 8 != 0 {
+                assert_eq!(joined_packed[shot * wj + wj - 1] >> ((nd + no) % 8), 0);
+            }
+        }
+        // Some detectors fired, or the comparison would prove little.
+        assert!(bytes.contains(&1) || shots < 64);
+    }
+}

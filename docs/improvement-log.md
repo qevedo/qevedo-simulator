@@ -3,6 +3,105 @@
 One entry per improvement run: what changed, why, what it measured, and
 what to try next. Newest first.
 
+## 2026-11-02 — Results into NumPy without the Python-side work, and bit-packed detection events (0.1.4)
+
+**What.**
+- `sample_detectors(..., bit_packed=True)`: shot-major uint8 arrays with
+  eight detectors (or observables) per byte, detector `d` in bit `d % 8`
+  of byte `d // 8`, as Stim's `sample(bit_packed=True)`; without
+  `separate_observables` the detectors and observables are packed
+  together, as in Stim. In Rust: `DetectorSamples::
+  write_detectors_shot_major_packed`, `write_observables_shot_major_packed`
+  and `write_shot_major(packed, out)` (observables appended, bool or
+  packed), all from one const-generic transpose.
+- `Samples::write_bytes` and `write_packed`: measurement-major records as
+  one byte per shot (a 256-entry table expands each byte into eight) or
+  eight shots per byte, in parallel by rows. `sample` no longer unpacks
+  with NumPy.
+- The binding asks Python for `numpy.empty` arrays of the final size
+  before sampling (sizes follow from the circuit), checks each one's
+  `__array_interface__`, and samples and writes into them in one visit to
+  a thread pool built once per call. No bytearray, no copy, no
+  `np.unpackbits`, no `np.concatenate`.
+- `benchmarks/bench_output.py` (`results/output.csv`) and
+  `benchmarks/compare_builds.py` (`results/output_before_after*.csv`).
+
+**Why.** Item 1 of the previous entry's list. The previous entry measured
+12 s for `sample` on the d = 51 code. On this machine (numpy 2.5.4) the
+0.1.3 build took 1.6–2.5 s for that call, so the measured weakness was
+smaller than recorded: about half the time went to unpacking in NumPy
+rather than sampling. The bit-packed detector output adds a capability: at
+d = 101, 10,000 shots of detection events are 10 GB as bools and do not
+fit this 15 GB machine, but they are 1.3 GB packed, the layout decoders
+and Stim's users already handle. A search of recent work (stabilizer
+simulators on GPUs, Quantum 2026; STABSim, arXiv:2507.03092; SymPhase)
+found no detector-sampling method that would beat qvd's current approach
+on CPUs. Making the Python results as fast as the Rust ones was the most
+useful step that could be verified end to end today. The other candidates
+(noise on near-Clifford frames, `MPP` in the reader) are features fewer
+people use.
+
+**Measured** (4-vCPU Xeon VM at 2.1 GHz; complete runs of both scripts).
+Against 0.1.3, interleaved, each case in a fresh process
+(`output_before_after.csv`, best of 3 × 3 rounds), 4 threads / 1 thread:
+
+| d = 51 | 0.1.3 | 0.1.4 | ratio |
+|---|---|---|---|
+| `sample` (bool) | 1.70 / 2.52 s | 0.70 / 1.39 s | 0.41 / 0.55 |
+| `sample(bit_packed=True)` | 0.91 / 1.46 s | 0.68 / 1.29 s | 0.75 / 0.88 |
+| `sample_detectors` (bool) | 1.76 / 2.49 s | 1.18 / 2.16 s | 0.67 / 0.87 |
+| same, observables appended | 3.25 / 5.24 s | 1.13 / 1.93 s | 0.35 / 0.37 |
+
+At d = 21 the ratios are 0.48–0.97; at d = 11 (calls of 6–25 ms, also
+timed with 15 repeats in `output_before_after_small.csv`) 0.40–0.93,
+except bit-packed records on one thread, 1.03 (8.1 against 8.4 ms).
+Longer development checks of that case (hundreds of calls per build,
+not recorded) put it at about 2%. In the 3-repeat file the same case on
+4 threads reads 1.70 (6.9 against 11.7 ms). The 15-repeat run gave 0.93,
+and so did the longer checks, so it was a spike on the VM, not a
+regression.
+
+Against Stim 1.16 (`output.csv`), detection events, shot-major: bool 9.0×
+faster at d = 51 on 4 vCPUs (1.13 s against 10.1 s; 5.1× on one thread);
+bit-packed, 13.6 s against 303 s at d = 101 (34.0 s on one thread). Raw
+records at d = 51: 0.72 s against 11.8 s for Stim's shot-major sampler.
+
+The Rust benchmark binaries: `bench`, `mps`, `nearclifford`, `pauliprop`,
+`shots` and `kernels` have byte-identical machine code before and after
+(`.text` compared). `stabilizer` differs only in the detector writers;
+timed with the example itself, interleaved, best of 5, its cases came
+out 0.94–1.02, and noisy d = 51 on one thread 1.055. Its code there is unchanged, only moved by 224 bytes,
+so 20 more interleaved pairs were run on that case: median ratio 0.98,
+mean paired ratio 1.017, best-of ratio 1.09. The spread (0.80–1.09 s) is
+far wider than any difference. The Stim-format `detectors` mode came out
+0.95–0.98.
+
+**Learned.**
+- Where the output memory comes from mattered more than the code that
+  writes it. Writing into a Python bytearray made bool records at d = 21
+  slower on one thread than the old NumPy unpack: the bytearray is zeroed
+  by one thread in 4 KB pages, while NumPy's allocator asks for huge pages
+  and does not zero. Switching to `numpy.empty` arrays took that case
+  from 1.04 (a complete `compare_builds.py` run of the intermediate build)
+  to 0.64–0.75.
+- Building a thread pool per step (sample, then write) and visiting a pool
+  twice both showed in the millisecond calls at d = 11; one pool and one
+  visit per call fixed both.
+- A table of per-row slices for the transpose (2 MB at d = 51, read by
+  every 64-shot block) was measurably slower than computing row offsets.
+- PyO3's buffer protocol is not available under `abi3-py310` (it needs the
+  3.11 limited API), hence `__array_interface__`.
+- Timings of a few milliseconds on this VM need hundreds of calls per
+  build: several cases moved by ±15% between 3-repeat passes.
+
+**Next.**
+1. Noise on the near-Clifford backend's per-shot frames (noisy
+   magic-state circuits).
+2. `MPP` and `PAULI_CHANNEL_2` in the Stim reader, and `to_stim` writing
+   detectors and observables.
+3. Detection events without keeping every measurement record (memory at
+   d = 101 is dominated by the 1.3 GB record, as large as the output).
+
 ## 2026-10-31 — Stim's circuit format and detection events (0.1.3)
 
 **What.**

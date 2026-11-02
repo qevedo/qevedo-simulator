@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use num_complex::Complex64;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyByteArray, PyBytes};
+use pyo3::types::PyBytes;
 
 use qvd::threads::{Placement, pool};
 use qvd::{Backend, Circuit, Gate, Instruction, Matrix, Noise, Options};
@@ -564,6 +564,26 @@ fn compute<T: Send>(
     })
 }
 
+/// The threads a call asked for, built once and reused by each of its
+/// steps. A call that samples and then writes its result into a NumPy
+/// buffer would otherwise build a pool (and start its threads) per step,
+/// which shows at small sizes: a distance-11 code samples in 10 ms.
+struct Threads(Option<rayon::ThreadPool>);
+
+impl Threads {
+    fn new(placement: Option<Placement>) -> Threads {
+        Threads(placement.map(|placement| pool(&placement)))
+    }
+
+    /// Run `f` without the GIL, on these threads.
+    fn run<T: Send>(&self, py: Python<'_>, f: impl FnOnce() -> T + Send) -> T {
+        py.detach(move || match &self.0 {
+            Some(pool) => pool.install(f),
+            None => f(),
+        })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn options(
     backend: &str,
@@ -656,122 +676,191 @@ fn statevector_bytes<'py>(
 }
 
 /// Shots of a Clifford circuit (noisy or not) on the stabilizer backend,
-/// measurement-major and bit-packed: classical bit `c` of shot `s` is bit
-/// `s % 8` of byte `c * ceil(shots / 8) + s / 8`; see
+/// measurement-major: classical bit `c` of shot `s` is byte
+/// `c * shots + s` (0 or 1), or with `bit_packed` bit `s % 8` of byte
+/// `c * ceil(shots / 8) + s / 8`, in an array from `alloc`; see
 /// `qevedo.simulator.sample`.
 #[pyfunction]
-#[pyo3(signature = (circuit, shots, seed = None, threads = None))]
+#[pyo3(signature = (alloc, circuit, shots, seed = None, threads = None, bit_packed = false))]
 fn sample_bytes<'py>(
     py: Python<'py>,
+    alloc: &Bound<'py, PyAny>,
     circuit: &PyCircuit,
     shots: usize,
     seed: Option<u64>,
     threads: Option<&Bound<'py, PyAny>>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let placement = parse_threads(threads)?;
+    bit_packed: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let threads = Threads::new(parse_threads(threads)?);
     let inner = circuit.inner.clone();
-    let samples = compute(py, placement, move || {
-        qvd::stabilizer::sample(&inner, shots, seed)
-    })
-    .map_err(value_error)?;
-    let bytes = rows_to_bytes(
-        (0..samples.num_clbits).map(|c| samples.clbit_words(c)),
-        shots,
-    );
-    Ok(PyBytes::new(py, &bytes))
+    let rows = inner.num_clbits;
+    let [records] = sampled_arrays(
+        py,
+        &threads,
+        alloc,
+        [rows * row(shots, bit_packed)],
+        move |[out]| {
+            let samples = qvd::stabilizer::sample(&inner, shots, seed)?;
+            write_records(&samples, bit_packed, out);
+            Ok(())
+        },
+    )?;
+    Ok(records)
 }
 
-/// Rows of bit-packed words (one per classical bit, detector or
-/// observable) as bytes, `ceil(shots / 8)` per row, with the bits past the
-/// last shot cleared.
-fn rows_to_bytes<'a>(rows: impl Iterator<Item = &'a [u64]>, shots: usize) -> Vec<u8> {
-    let width = shots.div_ceil(8);
-    let mut bytes = Vec::new();
-    for row in rows {
-        let start = bytes.len();
-        for word in row {
-            bytes.extend_from_slice(&word.to_le_bytes());
-        }
-        bytes.truncate(start + width);
-        if !shots.is_multiple_of(8) {
-            bytes[start + width - 1] &= (1u8 << (shots % 8)) - 1;
-        }
+/// The bytes of one row of `count` entries: one per entry, or one bit each.
+fn row(count: usize, bit_packed: bool) -> usize {
+    if bit_packed { count.div_ceil(8) } else { count }
+}
+
+/// Measurement records into `out`, one byte per shot or bit-packed.
+fn write_records(samples: &qvd::stabilizer::Samples, bit_packed: bool, out: &mut [u8]) {
+    if bit_packed {
+        samples.write_packed(out)
+    } else {
+        samples.write_bytes(out)
     }
-    bytes
+}
+
+/// New arrays of the given lengths in bytes from `alloc` (`numpy.empty`,
+/// from the Python side), then `sample_into` run on the thread pool without
+/// the GIL, writing the samples into them.
+///
+/// The arrays come from NumPy rather than a bytearray because of how the
+/// memory is obtained: NumPy asks the kernel for huge pages for arrays of
+/// 4 MB and more and does not zero them, so the pages are first touched by
+/// the parallel writers. A bytearray is zeroed by one thread in 4 KB pages
+/// first, which made a distance-21 record (97 MB) slower to return than
+/// NumPy's own unpack had been. Results of a gigabyte or more are common at
+/// large distances, so nothing is copied afterwards either. The arrays are
+/// made before sampling (their sizes follow from the circuit), so that
+/// sampling and writing are one visit to the thread pool: a second visit
+/// waits for a sleeping worker to wake, which showed in the 8 ms calls of
+/// a distance-11 code on a virtual machine.
+///
+/// Each address comes from the array's `__array_interface__`, checked to
+/// be a writable, C-contiguous array of the requested length. Nothing else
+/// holds the arrays while they are written: they were created just now,
+/// and the GIL is released only for the sampling and writing.
+fn sampled_arrays<'py, const N: usize>(
+    py: Python<'py>,
+    threads: &Threads,
+    alloc: &Bound<'py, PyAny>,
+    lens: [usize; N],
+    sample_into: impl FnOnce([&mut [u8]; N]) -> Result<(), String> + Send,
+) -> PyResult<[Bound<'py, PyAny>; N]> {
+    let mut arrays = Vec::with_capacity(N);
+    let mut addresses = [0usize; N];
+    for (i, &len) in lens.iter().enumerate() {
+        let array = alloc.call1((len,))?;
+        let interface = array.getattr("__array_interface__")?;
+        let (address, readonly): (usize, bool) = interface.get_item("data")?.extract()?;
+        let shape: Vec<usize> = interface.get_item("shape")?.extract()?;
+        let typestr: String = interface.get_item("typestr")?.extract()?;
+        let contiguous = interface
+            .get_item("strides")
+            .map_or(true, |strides| strides.is_none());
+        if readonly || !contiguous || typestr != "|u1" || shape != [len] {
+            return Err(PyRuntimeError::new_err(
+                "the output allocator must return a new, writable uint8 array of the requested length",
+            ));
+        }
+        addresses[i] = address;
+        arrays.push(array);
+    }
+    threads
+        .run(py, move || {
+            // SAFETY: each address was checked above to start `len` writable,
+            // contiguous bytes, kept alive by `arrays` for the whole call and
+            // reachable by no one else while the GIL is released. NumPy
+            // allocates at least one byte, so even an empty array's address
+            // is valid for a slice of length 0.
+            let outs = std::array::from_fn(|i| unsafe {
+                std::slice::from_raw_parts_mut(addresses[i] as *mut u8, lens[i])
+            });
+            sample_into(outs)
+        })
+        .map_err(value_error)?;
+    Ok(arrays
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("one array per length")))
 }
 
 /// Detection events and observable flips of a circuit in Stim's format,
-/// shot-major with one byte (0 or 1) per detector or observable, as two
-/// bytearrays, with the number of detectors and of observables; see
-/// `qevedo.simulator.sample_detectors`.
+/// shot-major, as two arrays from `alloc`, with the number of detectors and
+/// of observables; see `qevedo.simulator.sample_detectors`. Each shot is a
+/// row of one byte (0 or 1) per detector, or with `bit_packed` of one bit
+/// (Stim's packing). With `append_observables` the observables follow the
+/// detectors in each row of the first array, and the second is empty.
 #[pyfunction]
-#[pyo3(signature = (text, shots, seed = None, threads = None))]
-#[allow(clippy::type_complexity)]
+#[pyo3(signature = (alloc, text, shots, seed = None, threads = None, bit_packed = false, append_observables = false))]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn stim_detector_bytes<'py>(
     py: Python<'py>,
+    alloc: &Bound<'py, PyAny>,
     text: &str,
     shots: usize,
     seed: Option<u64>,
     threads: Option<&Bound<'py, PyAny>>,
-) -> PyResult<(
-    Bound<'py, PyByteArray>,
-    Bound<'py, PyByteArray>,
-    usize,
-    usize,
-)> {
-    let placement = parse_threads(threads)?;
+    bit_packed: bool,
+    append_observables: bool,
+) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>, usize, usize)> {
+    let threads = Threads::new(parse_threads(threads)?);
     let circuit = qvd::stim::parse(text).map_err(value_error)?;
-    let samples = compute(py, placement.clone(), move || {
-        qvd::stabilizer::sample_detectors(&circuit, shots, seed)
-    })
-    .map_err(value_error)?;
-    // Written straight into the bytearrays NumPy will view, without the GIL:
-    // nothing else can see them yet. A result of a gigabyte or more is
-    // common at large distances, and a second copy would cost as much as
-    // the sampling.
-    let fill = |len: usize, write: &(dyn Fn(&mut [u8]) + Sync)| {
-        PyByteArray::new_with(py, len, |buffer| {
-            compute(py, placement.clone(), || write(buffer));
-            Ok(())
-        })
+    let (nd, no) = (circuit.detectors.len(), circuit.observables.len());
+    let lens = if append_observables {
+        [shots * row(nd + no, bit_packed), 0]
+    } else {
+        [shots * row(nd, bit_packed), shots * row(no, bit_packed)]
     };
-    let detectors = fill(shots * samples.num_detectors, &|b| {
-        samples.write_detectors_shot_major(b)
+    let [detectors, observables] = sampled_arrays(py, &threads, alloc, lens, move |[d, o]| {
+        let samples = qvd::stabilizer::sample_detectors(&circuit, shots, seed)?;
+        assert_eq!((samples.num_detectors, samples.num_observables), (nd, no));
+        match (append_observables, bit_packed) {
+            (true, _) => samples.write_shot_major(bit_packed, d),
+            (false, true) => {
+                samples.write_detectors_shot_major_packed(d);
+                samples.write_observables_shot_major_packed(o);
+            }
+            (false, false) => {
+                samples.write_detectors_shot_major(d);
+                samples.write_observables_shot_major(o);
+            }
+        }
+        Ok(())
     })?;
-    let observables = fill(shots * samples.num_observables, &|b| {
-        samples.write_observables_shot_major(b)
-    })?;
-    Ok((
-        detectors,
-        observables,
-        samples.num_detectors,
-        samples.num_observables,
-    ))
+    Ok((detectors, observables, nd, no))
 }
 
 /// Measurement results of a circuit in Stim's format (with `M(p)` flips
 /// and inverted results applied), laid out as `sample_bytes`, with the
 /// number of measurements.
 #[pyfunction]
-#[pyo3(signature = (text, shots, seed = None, threads = None))]
+#[pyo3(signature = (alloc, text, shots, seed = None, threads = None, bit_packed = false))]
 fn stim_sample_bytes<'py>(
     py: Python<'py>,
+    alloc: &Bound<'py, PyAny>,
     text: &str,
     shots: usize,
     seed: Option<u64>,
     threads: Option<&Bound<'py, PyAny>>,
-) -> PyResult<(Bound<'py, PyBytes>, usize)> {
-    let placement = parse_threads(threads)?;
+    bit_packed: bool,
+) -> PyResult<(Bound<'py, PyAny>, usize)> {
+    let threads = Threads::new(parse_threads(threads)?);
     let circuit = qvd::stim::parse(text).map_err(value_error)?;
-    let samples = compute(py, placement, move || {
-        qvd::stabilizer::sample_stim(&circuit, shots, seed)
-    })
-    .map_err(value_error)?;
-    let bytes = rows_to_bytes(
-        (0..samples.num_clbits).map(|c| samples.clbit_words(c)),
-        shots,
-    );
-    Ok((PyBytes::new(py, &bytes), samples.num_clbits))
+    let rows = circuit.num_measurements();
+    let [records] = sampled_arrays(
+        py,
+        &threads,
+        alloc,
+        [rows * row(shots, bit_packed)],
+        move |[out]| {
+            let samples = qvd::stabilizer::sample_stim(&circuit, shots, seed)?;
+            write_records(&samples, bit_packed, out);
+            Ok(())
+        },
+    )?;
+    Ok((records, rows))
 }
 
 /// A circuit in Stim's format as a `Circuit` (one classical bit per

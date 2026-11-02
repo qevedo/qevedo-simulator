@@ -71,6 +71,12 @@ matching = pymatching.Matching.from_detector_error_model(circuit.detector_error_
 logical_error_rate = (matching.decode_batch(detectors) != observables).any(axis=1).mean()
 ```
 
+`bit_packed=True` returns uint8 arrays with eight detectors per byte
+(detector `d` in bit `d % 8` of byte `d // 8`), Stim's packing and an
+eighth of the memory, as decoders that take packed input expect;
+`sample(..., bit_packed=True)` packs eight shots per byte. All of these
+are written by Rust into the array's memory, without a copy in Python.
+
 The reader takes Stim's Clifford gates, `M`/`MX`/`MY`/`MR`/`MRX`/`MRY`
 with measurement-flip probabilities (`M(0.01)`) and inverted targets
 (`M !3`), `R`/`RX`/`RY`, `MPAD`, the Pauli channels, `DETECTOR`,

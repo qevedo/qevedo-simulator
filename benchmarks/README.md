@@ -12,6 +12,9 @@ benchmarks/
 │   ├── stabilizer.csv          Clifford circuits: qvd vs Stim vs Qiskit Aer
 │   ├── noise.csv               noisy (and noiseless) surface codes: qvd vs Stim
 │   ├── noise_agreement.csv     detection rates of noisy codes: qvd vs Stim
+│   ├── detectors*.csv          detection events of Stim's circuits: qvd vs Stim
+│   ├── output.csv              records and detection events into NumPy: qvd vs Stim
+│   ├── output_before_after.csv the same, two qvd builds interleaved (0.1.3 vs 0.1.4)
 │   ├── mps.csv                 matrix product states: qvd vs Qiskit Aer vs quimb
 │   ├── nearclifford.csv        Clifford+T circuits: qvd vs Qiskit Aer
 │   ├── pauliprop.csv           expectation values: qvd vs IBM's pauli-prop
@@ -20,6 +23,9 @@ benchmarks/
 ├── compare.py                  times Qiskit Aer and qsim on a QASM file
 ├── compare_stim.py             times Stim and Qiskit Aer's stabilizer method
 ├── bench_noise.py              noisy surface codes against Stim -> noise*.csv
+├── bench_detectors.py          Stim's circuits, detection events -> detectors*.csv
+├── bench_output.py             sample / sample_detectors, bool and bit-packed -> output.csv
+├── compare_builds.py           two builds interleaved -> output_before_after.csv
 ├── compare_mps.py              times Qiskit Aer's and quimb's MPS simulators
 ├── compare_nearclifford.py     times Qiskit Aer's methods on Clifford+T circuits
 ├── compare_pauliprop.py        times IBM's pauli-prop on an expectation value
@@ -111,6 +117,23 @@ rates (200,000 shots, a two-sample z-score per detector) and the logical
 error rates after the same PyMatching decoder; `detectors_long.csv` repeats
 the smallest code with 24 million shots per simulator, per detector.
 
+## Output into NumPy
+
+`bench_output.py` (`output.csv`) times what a Python user gets back from
+the same generated codes (p = 0.001, 10,000 shots, best of 3; once at
+d = 101): raw measurement records from qvd's `sample` (measurement-major,
+bool or eight shots per byte) against Stim's `compile_sampler().sample`
+(shot-major, bool or bit-packed; Stim has no measurement-major output
+from its sampler), and detection events from both simulators, shot-major,
+bool and bit-packed. At d = 101 only the bit-packed outputs run, since a
+bool array would be 10 GB. Same 4-vCPU machine type as `detectors.csv`,
+measured on 2026-11-02 with numpy 2.5.4 and stim 1.16.0.
+
+`compare_builds.py` (`output_before_after.csv`) runs two builds of the
+package (0.1.3 from before this output work, and 0.1.4) in turn, each case
+in a fresh process, best of 3 calls over 3 rounds, to show what the change
+did on the same machine at the same time.
+
 ## Matrix product states
 
 ![MPS benchmark](charts/mps.svg)
@@ -175,6 +198,11 @@ cargo build --release --example stabilizer
 # (pip install pymatching; the Python package built as above).
 .bench-venv/bin/python benchmarks/bench_detectors.py --distances 11,21,51
 .bench-venv/bin/python benchmarks/bench_detectors.py --long
+
+# Records and detection events into NumPy, bool and bit-packed, against Stim.
+.bench-venv/bin/python benchmarks/bench_output.py
+# Two builds of the package, interleaved (each venv has one build installed).
+.bench-venv/bin/python benchmarks/compare_builds.py --before /venv-old/bin/python --after /venv-new/bin/python
 
 # MPS: 64 qubits, depth 20, χ ≤ 256, 1000 shots.
 cargo run --release --example mps -- random 64 20 256 1000 --qasm /tmp/m.qasm

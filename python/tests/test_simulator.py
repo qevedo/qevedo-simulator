@@ -383,6 +383,67 @@ def test_from_stim_and_detector_shapes():
         sample_detectors("MPP X0*X1\n", 10)
 
 
+def test_bit_packed_outputs_match_the_bool_outputs():
+    np = pytest.importorskip("numpy")
+    # Odd shot counts and nine detectors leave partly filled bytes, whose
+    # padding bits must be zero (as NumPy's packbits and Stim leave them).
+    text = REPETITION.replace("REPEAT 4", "MR 1 3\nREPEAT 4") + "DETECTOR rec[-1] rec[-2]\n"
+    for shots in (1, 13, 1000):
+        records = sample(text, shots, seed=4)
+        packed = sample(text, shots, seed=4, bit_packed=True)
+        assert records.dtype == bool and packed.dtype == np.uint8
+        assert (np.packbits(records, axis=1, bitorder="little") == packed).all()
+
+        dets, obs = sample_detectors(text, shots, seed=4)
+        assert dets.shape == (shots, 9)
+        pd, po = sample_detectors(text, shots, seed=4, bit_packed=True)
+        assert pd.shape == (shots, 2) and po.shape == (shots, 1)
+        assert (np.packbits(dets, axis=1, bitorder="little") == pd).all()
+        assert (np.packbits(obs, axis=1, bitorder="little") == po).all()
+        joined = sample_detectors(text, shots, seed=4, separate_observables=False, bit_packed=True)
+        both = np.concatenate([dets, obs], axis=1)
+        assert (np.packbits(both, axis=1, bitorder="little") == joined).all()
+    assert dets.any() and records.any() and not records.all()
+    # The results are ordinary writable arrays, not views of shared memory.
+    dets[0, 0] = not dets[0, 0]
+
+
+def test_output_allocator_is_checked():
+    np = pytest.importorskip("numpy")
+    from qevedo.simulator import _native
+
+    # Rust writes into the array the allocator returns, so it refuses one
+    # that is the wrong size, type, layout or read-only.
+    text = "R 0\nX_ERROR(0.5) 0\nM 0\n"
+    readonly = np.zeros(3, dtype=np.uint8)
+    readonly.flags.writeable = False
+    for bad in (
+        lambda n: np.empty(n + 1, dtype=np.uint8),
+        lambda n: np.empty(n, dtype=np.int16),
+        lambda n: np.empty(2 * n, dtype=np.uint8)[::2],
+        lambda n: readonly[:n],
+    ):
+        with pytest.raises(RuntimeError, match="allocator"):
+            _native.stim_sample_bytes(bad, text, 24)
+    raw, rows = _native.stim_sample_bytes(lambda n: np.empty(n, dtype=np.uint8), text, 24)
+    assert rows == 1 and raw.shape == (24,) and set(raw.tolist()) <= {0, 1}
+
+
+def test_bit_packed_detectors_in_stims_layout():
+    stim = pytest.importorskip("stim")
+    np = pytest.importorskip("numpy")
+    # Without noise, Stim's and qvd's packed detectors are identical (all
+    # zero), and so are their shapes; with certain errors, identical too.
+    circuit = stim.Circuit.generated("repetition_code:memory", distance=5, rounds=3)
+    theirs = circuit.compile_detector_sampler().sample(10, bit_packed=True, append_observables=True)
+    ours = sample_detectors(circuit, 10, separate_observables=False, bit_packed=True)
+    assert ours.shape == theirs.shape and ours.dtype == theirs.dtype and not ours.any()
+    certain = stim.Circuit(str(circuit).replace("R 0 1 2 3 4 5 6 7 8", "R 0 1 2 3 4 5 6 7 8\nX_ERROR(1) 0 4"))
+    theirs = certain.compile_detector_sampler().sample(10, bit_packed=True, append_observables=True)
+    ours = sample_detectors(certain, 10, separate_observables=False, bit_packed=True)
+    assert theirs.any() and (ours == theirs).all()
+
+
 def test_detectors_against_stim():
     stim = pytest.importorskip("stim")
     np = pytest.importorskip("numpy")

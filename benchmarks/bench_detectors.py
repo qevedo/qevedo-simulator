@@ -17,8 +17,8 @@ Timing, in one process, both returning shot-major NumPy bool arrays
 (this includes reading the text and unrolling its REPEAT block), and
 Stim's `compile_detector_sampler().sample(shots, separate_observables=True)`
 (single-threaded; compiling includes its reference sample), and the same
-with `bit_packed=True` (eight detectors per byte, Stim's fastest output; qvd
-has no bit-packed shot-major output yet). Best of 3, one run at d = 101.
+with `bit_packed=True` (eight detectors per byte). Best of 3, one run at
+d = 101. qvd's bit-packed output is timed by `bench_output.py`.
 
 Agreement: the rate at which each detector fires, 200,000 shots, seed 1 in
 both, with a two-sample z-score per detector; and the logical error rate

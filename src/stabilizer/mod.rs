@@ -394,6 +394,24 @@ impl Samples {
         &self.bits[clbit * self.words..(clbit + 1) * self.words]
     }
 
+    /// The results measurement-major, one byte (0 or 1) per shot: byte
+    /// `c * shots + s` is classical bit `c` of shot `s` (a NumPy bool array
+    /// of shape `(num_clbits, shots)`, as Stim's `FlipSimulator` lays out
+    /// its flips). `out` must hold `num_clbits * shots` bytes.
+    pub fn write_bytes(&self, out: &mut [u8]) {
+        assert_eq!(out.len(), self.num_clbits * self.shots);
+        unpack_rows(&self.bits, self.words, self.shots, out);
+    }
+
+    /// The results measurement-major and bit-packed: classical bit `c` of
+    /// shot `s` is bit `s % 8` of byte `c * ceil(shots / 8) + s / 8`, with
+    /// the bits past the last shot zero. `out` must hold
+    /// `num_clbits * ceil(shots / 8)` bytes.
+    pub fn write_packed(&self, out: &mut [u8]) {
+        assert_eq!(out.len(), self.num_clbits * self.shots.div_ceil(8));
+        pack_rows(&self.bits, self.words, self.shots, out);
+    }
+
     /// Count the outcomes as bitstrings (classical bit 0 on the right).
     pub fn counts(&self) -> std::collections::BTreeMap<String, usize> {
         if self.num_clbits <= 128 {
@@ -748,9 +766,8 @@ impl DetectorSamples {
     /// [`Self::detectors_shot_major`] into a buffer of
     /// `shots * num_detectors` bytes (a NumPy array's, say).
     pub fn write_detectors_shot_major(&self, out: &mut [u8]) {
-        shot_major(
-            &self.detectors,
-            self.num_detectors,
+        shot_major::<false>(
+            &[(&self.detectors, self.num_detectors)],
             self.words,
             self.shots,
             out,
@@ -760,40 +777,178 @@ impl DetectorSamples {
     /// [`Self::observables_shot_major`] into a buffer of
     /// `shots * num_observables` bytes.
     pub fn write_observables_shot_major(&self, out: &mut [u8]) {
-        shot_major(
-            &self.observables,
-            self.num_observables,
+        shot_major::<false>(
+            &[(&self.observables, self.num_observables)],
             self.words,
             self.shots,
             out,
         );
     }
+
+    /// The detection events shot-major and bit-packed, as Stim's
+    /// `sample(bit_packed=True)`: each shot is a row of
+    /// `ceil(num_detectors / 8)` bytes, and detector `d` is bit `d % 8` of
+    /// byte `d / 8` of its shot's row (padding bits zero). An eighth of the
+    /// bytes, which is what keeps a distance-101 code within memory.
+    pub fn write_detectors_shot_major_packed(&self, out: &mut [u8]) {
+        shot_major::<true>(
+            &[(&self.detectors, self.num_detectors)],
+            self.words,
+            self.shots,
+            out,
+        );
+    }
+
+    /// The observable flips, as [`Self::write_detectors_shot_major_packed`].
+    pub fn write_observables_shot_major_packed(&self, out: &mut [u8]) {
+        shot_major::<true>(
+            &[(&self.observables, self.num_observables)],
+            self.words,
+            self.shots,
+            out,
+        );
+    }
+
+    /// Detectors and observables in one shot-major array, the observables
+    /// after the detectors in each shot's row (Stim's
+    /// `separate_observables=False`): `num_detectors + num_observables`
+    /// bytes per shot, or bit-packed with `packed`. Written in one pass,
+    /// so that joining two arrays afterwards does not copy the result.
+    pub fn write_shot_major(&self, packed: bool, out: &mut [u8]) {
+        let parts = [
+            (&self.detectors[..], self.num_detectors),
+            (&self.observables[..], self.num_observables),
+        ];
+        if packed {
+            shot_major::<true>(&parts, self.words, self.shots, out);
+        } else {
+            shot_major::<false>(&parts, self.words, self.shots, out);
+        }
+    }
 }
 
-/// Transpose `count` bit-packed rows of `words` words into `shots` rows of
-/// `count` bytes in `out`.
+/// Transpose bit-packed rows (one per detector or observable, 64 shots per
+/// word, bits past the last shot zero) into one row per shot in `out`: one
+/// byte (0 or 1) per input row, or with `PACKED` one bit, eight rows per
+/// byte with row `r` in bit `r % 8` of byte `r / 8` (Stim's little-endian
+/// packing). The input rows come in `parts`, each a run of `count` rows of
+/// `words` words, laid end to end in the output (detectors, then
+/// observables).
 ///
 /// Detection events are rare, so this walks the set bits of each word
 /// (`trailing_zeros`) rather than every bit. Each block of 64 shots is one
-/// task, which zeroes its own `64 * count` bytes and then sets its ones
-/// while they are in cache (and, for a fresh allocation, touches its pages
-/// first, in parallel).
-fn shot_major(rows: &[u64], count: usize, words: usize, shots: usize, out: &mut [u8]) {
-    assert_eq!(out.len(), shots * count);
-    if count == 0 {
+/// task, which zeroes its own output and then sets its ones while they are
+/// in cache (and, for a fresh allocation, touches its pages first, in
+/// parallel). Rows are found by arithmetic in each part rather than through
+/// a table of row slices: at distance 51 such a table is 2 MB, read again
+/// by every block, and it was measurably slower.
+fn shot_major<const PACKED: bool>(
+    parts: &[(&[u64], usize)],
+    words: usize,
+    shots: usize,
+    out: &mut [u8],
+) {
+    let count: usize = parts.iter().map(|&(_, n)| n).sum();
+    let width = if PACKED { count.div_ceil(8) } else { count };
+    assert_eq!(out.len(), shots * width);
+    assert!(shots <= 64 * words);
+    if width == 0 {
         return;
     }
-    out.par_chunks_mut(64 * count)
+    out.par_chunks_mut(64 * width)
         .enumerate()
         .for_each(|(w, block)| {
             block.fill(0);
-            for r in 0..count {
-                let mut word = rows[r * words + w];
-                while word != 0 {
-                    let bit = word.trailing_zeros() as usize;
-                    block[bit * count + r] = 1;
-                    word &= word - 1;
+            let mut r = 0;
+            for &(rows, n) in parts {
+                for i in 0..n {
+                    let mut word = rows[i * words + w];
+                    while word != 0 {
+                        let bit = word.trailing_zeros() as usize;
+                        if PACKED {
+                            block[bit * width + r / 8] |= 1 << (r % 8);
+                        } else {
+                            block[bit * width + r] = 1;
+                        }
+                        word &= word - 1;
+                    }
+                    r += 1;
                 }
+            }
+        });
+}
+
+/// `UNPACK[b]` holds the eight bits of byte `b` as eight bytes of 0 or 1,
+/// lowest bit first when stored little-endian: one load expands eight
+/// shots.
+const UNPACK: [u64; 256] = {
+    let mut table = [0u64; 256];
+    let mut b = 0;
+    while b < 256 {
+        let mut bit = 0;
+        while bit < 8 {
+            table[b] |= (((b >> bit) & 1) as u64) << (8 * bit);
+            bit += 1;
+        }
+        b += 1;
+    }
+    table
+};
+
+/// Write `count` bit-packed rows of `words` words (row `r` at
+/// `bits[r * words..]`) as rows of `shots` bytes of 0 or 1 (the layout of
+/// a NumPy bool array of shape `(count, shots)`), one task per run of rows.
+///
+/// Measurement records are dense (about half the bits of a raw record are
+/// ones), so the set-bit walk of [`shot_major`] would not pay: every byte
+/// of input becomes eight bytes of output through [`UNPACK`], and the cost
+/// is writing the output, eight times the input.
+fn unpack_rows(bits: &[u64], words: usize, shots: usize, out: &mut [u8]) {
+    assert_eq!(out.len() % shots.max(1), 0);
+    if shots == 0 {
+        return;
+    }
+    out.par_chunks_mut(shots)
+        .enumerate()
+        .with_min_len(16)
+        .for_each(|(r, row)| {
+            let input = &bits[r * words..(r + 1) * words];
+            for (chunk, &word) in row.chunks_mut(64).zip(input) {
+                let bytes = word.to_le_bytes();
+                if chunk.len() == 64 {
+                    for (eight, &b) in chunk.chunks_exact_mut(8).zip(&bytes) {
+                        eight.copy_from_slice(&UNPACK[b as usize].to_le_bytes());
+                    }
+                } else {
+                    // The last word of a row, past which there are no shots.
+                    for (s, out) in chunk.iter_mut().enumerate() {
+                        *out = ((word >> s) & 1) as u8;
+                    }
+                }
+            }
+        });
+}
+
+/// Write `count` bit-packed rows of `words` words as rows of
+/// `ceil(shots / 8)` bytes, shot `s` in bit `s % 8` of byte `s / 8`, with
+/// the bits past the last shot cleared (the layout of NumPy's
+/// `packbits(..., bitorder="little")`).
+fn pack_rows(bits: &[u64], words: usize, shots: usize, out: &mut [u8]) {
+    let width = shots.div_ceil(8);
+    assert_eq!(out.len() % width.max(1), 0);
+    if width == 0 {
+        return;
+    }
+    out.par_chunks_mut(width)
+        .enumerate()
+        .with_min_len(64)
+        .for_each(|(r, row)| {
+            let input = &bits[r * words..(r + 1) * words];
+            for (chunk, &word) in row.chunks_mut(8).zip(input) {
+                chunk.copy_from_slice(&word.to_le_bytes()[..chunk.len()]);
+            }
+            if !shots.is_multiple_of(8) {
+                row[width - 1] &= (1u8 << (shots % 8)) - 1;
             }
         });
 }

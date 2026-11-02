@@ -335,15 +335,50 @@ never skipped. Three details:
   are rare, so each 64-shot word is walked by its set bits
   (`trailing_zeros`) into a zeroed block of `64 × detectors` bytes that
   stays in cache, one rayon task per block. The Python binding writes
-  straight into the bytearray NumPy views: at d = 51 the result is
-  1.3 GB, and the NumPy unpack and transpose it replaced, or even one more
-  copy, cost as much as the sampling.
+  straight into the array it returns: at d = 51 the result is 1.3 GB, and
+  the NumPy unpack and transpose it replaced, or even one more copy, cost
+  as much as the sampling.
+- *Every output layout written once, by Rust.* The same transpose writes
+  bit-packed shot-major rows (Stim's `bit_packed=True`: detector `d` in bit
+  `d % 8` of byte `d / 8`), and detectors and observables into one row per
+  shot when the observables are appended, instead of NumPy joining two
+  arrays afterwards. The packing is a const generic, and rows are found by
+  arithmetic: a table of row slices, read again by every 64-shot block, was
+  measurably slower at d = 51. Measurement records (`sample`) are dense
+  rather than rare, so they are not walked by set bits: each byte of a row
+  expands to eight bytes of 0 or 1 through a 256-entry table, one rayon
+  task per run of rows.
+- *Where the output memory comes from matters as much as the writing.* The
+  binding first wrote into a Python `bytearray`, which one thread zeroes
+  in 4 KB pages before Rust sees it; that made a distance-21 record slower
+  to return on one thread than the NumPy unpack it replaced. Rust now
+  calls `numpy.empty` and writes into that array (address and layout
+  checked from its `__array_interface__`): NumPy asks for huge pages above
+  4 MB and does not zero, so the pages are first touched by the parallel
+  writers. The arrays are made before sampling, since their sizes follow
+  from the circuit, so that one visit to the thread pool samples and
+  writes; a second visit waits for a sleeping worker, which showed in the
+  8 ms calls at d = 11. (PyO3's buffer protocol would be the tidier route,
+  but it needs the limited API of Python 3.11 and the wheel supports
+  3.10.) The effect against 0.1.3, interleaved on one machine
+  (`benchmarks/compare_builds.py`, `results/output_before_after*.csv`):
+  at d = 51, returning records takes 0.41× the time on 4 threads and
+  0.55× on one, bool detection events 0.67× and 0.87×, detection events
+  with the observables appended 0.35× and 0.37×; at d = 21 the same are
+  0.48/0.75×, 0.57/0.70× and 0.49/0.65×. Bit-packed records, already cheap,
+  took 0.75–0.97× at d = 21 and 51. At d = 11 a call takes a few
+  milliseconds, so those cases were also timed with 15 repeats
+  (`output_before_after_small.csv`): 0.93× and 1.03× for bit-packed
+  records, where the 3-repeat pass had given 1.70× on 4 threads, a spike
+  the 15-repeat run did not reproduce.
 
 Against Stim's detector sampler, on Stim's generated surface codes with
 p = 0.001 (10,000 shots, shot-major bool arrays from both, 4-vCPU VM):
-0.112 s against 0.359 s at d = 21 and 1.63 s against 9.92 s at d = 51
-(0.136 s and 2.32 s on one thread; Stim's better of plain and bit-packed
-output). At d = 51 on 4 threads, the Rust side splits into reading 0.09–0.10 s,
+0.080 s against 0.423 s at d = 21 and 1.13 s against 10.1 s at d = 51
+(0.179 s and 1.97 s on one thread; Stim's better of plain and bit-packed
+output; `results/output.csv`, version 0.1.4). Bit-packed on both sides,
+13.6 s against 303 s at d = 101. In 0.1.3, at d = 51 on 4 threads, the
+Rust side split into reading 0.09–0.10 s,
 sampling 0.71–0.77 s and the shot-major transpose 0.33–0.36 s (three runs
 of the `stabilizer` example's `detectors` mode on a file written by
 `stim.Circuit.generated`). Detection rates
@@ -732,8 +767,7 @@ remain (79 of its 87 s at 5 steps, θ_h = 1.2).
   heralded errors, classical control from measurement records and sweep
   bits, and `to_stim` does not write detectors. `sample_detectors` keeps
   every measurement record in memory (one bit per measurement and shot)
-  before reducing them to detectors; bit-packed shot-major output, which
-  Stim offers, is not there yet. Sampling detectors directly, with a cost that
+  before reducing them to detectors. Sampling detectors directly, with a cost that
   does not grow with the measurements (the Stim paper notes such a method
   and that Stim does not implement it), is not done either.
 - **Fewer cache misses in the stabilizer reference shot.** Its gates are

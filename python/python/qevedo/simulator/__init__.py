@@ -165,16 +165,28 @@ def sample(
     """
     import numpy as np
 
+    alloc = _byte_array(np)
     if _is_stim(circuit):
-        raw, rows = _stim_sample_bytes(str(circuit), shots, seed=seed, threads=threads)
+        raw, rows = _stim_sample_bytes(
+            alloc, str(circuit), shots, seed=seed, threads=threads, bit_packed=bit_packed
+        )
     else:
         circuit = _circuit(circuit)
-        raw = _sample_bytes(circuit, shots, seed=seed, threads=threads)
+        raw = _sample_bytes(
+            alloc, circuit, shots, seed=seed, threads=threads, bit_packed=bit_packed
+        )
         rows = circuit.num_clbits
-    packed = np.frombuffer(raw, dtype=np.uint8).reshape(rows, (shots + 7) // 8)
+    # Rust wrote the final layout into the array: reshape it, no copy.
     if bit_packed:
-        return packed.copy()
-    return np.unpackbits(packed, axis=1, count=shots, bitorder="little").astype(bool)
+        return raw.reshape(rows, (shots + 7) // 8)
+    return raw.view(np.bool_).reshape(rows, shots)
+
+
+def _byte_array(np):
+    # The allocator Rust calls for its output once it knows the size: a flat
+    # uint8 array, uninitialised (every byte is written), from NumPy's
+    # allocator (huge pages for large arrays).
+    return lambda length: np.empty(length, dtype=np.uint8)
 
 
 def _is_stim(circuit) -> bool:
@@ -209,6 +221,7 @@ def sample_detectors(
     seed: int | None = None,
     threads: int | str | None = None,
     separate_observables: bool = True,
+    bit_packed: bool = False,
 ):
     """Detection events and observable flips of a noisy error-correction
     circuit, as Stim's detector sampler returns them.
@@ -223,18 +236,36 @@ def sample_detectors(
     a pair ``(detectors, observables)`` of NumPy bool arrays of shapes
     ``(shots, num_detectors)`` and ``(shots, num_observables)``; without,
     one array with the observables appended after the detectors.
+
+    With ``bit_packed=True`` the arrays are uint8 with eight detectors (or
+    observables) per byte, detector ``d`` in bit ``d % 8`` of byte
+    ``d // 8``, of shapes ``(shots, ceil(num_detectors / 8))`` and so on,
+    as Stim's ``sample(bit_packed=True)``; without ``separate_observables``
+    the detectors and observables are packed together, as in Stim. An
+    eighth of the memory: a distance-101 surface code's 10,000 shots take
+    1.3 GB instead of 10 GB.
     """
     import numpy as np
 
     raw_d, raw_o, nd, no = _stim_detector_bytes(
-        _stim_text(circuit), shots, seed=seed, threads=threads
+        _byte_array(np),
+        _stim_text(circuit),
+        shots,
+        seed=seed,
+        threads=threads,
+        bit_packed=bit_packed,
+        append_observables=not separate_observables,
     )
-    # Shot-major bytes of 0 and 1 from Rust: a bool view, no copy.
-    detectors = np.frombuffer(raw_d, dtype=np.bool_).reshape(shots, nd)
-    observables = np.frombuffer(raw_o, dtype=np.bool_).reshape(shots, no)
+
+    # Shot-major bytes from Rust, already in the final layout: no copy.
+    def view(raw, count):
+        if bit_packed:
+            return raw.reshape(shots, (count + 7) // 8)
+        return raw.view(np.bool_).reshape(shots, count)
+
     if separate_observables:
-        return detectors, observables
-    return np.concatenate([detectors, observables], axis=1)
+        return view(raw_d, nd), view(raw_o, no)
+    return view(raw_d, nd + no)
 
 
 def _terms(observable) -> list[tuple[str, float]]:

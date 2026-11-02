@@ -25,8 +25,9 @@ studies need: the same distance-101 code with circuit-level depolarizing
 noise samples 10,000 shots in 6.0 s on a 4-vCPU virtual machine, where
 Stim takes 37.5 s, with the same detection statistics. Stim's own
 circuit files run directly, detectors included: detection events of
-Stim's generated distance-51 surface code come out 6.1× faster than from
-Stim's detector sampler (4.3× on one thread). Other circuits too large
+Stim's generated distance-51 surface code come out 9.0× faster than from
+Stim's detector sampler (5.1× on one thread), and bit-packed at
+distance 101 in 13.6 s against Stim's 303 s. Other circuits too large
 for a state vector run on a matrix product state backend, exact while the
 entanglement is low and approximate, with a fidelity estimate, beyond: it is
 1.6–14× faster than the faster of Qiskit Aer's and quimb's MPS simulators on
@@ -186,21 +187,30 @@ and the tools around them run unchanged.
 
 Stim's `surface_code:rotated_memory_z`, d rounds, with all four of its
 noise parameters at p = 0.001, 10,000 shots, the same text in both. Both
-return shot-major NumPy bool arrays (detectors, observables), in one
-Python process; qvd's time includes reading the text, and Stim's
-compiling its sampler. Measured on a 4-vCPU Xeon virtual machine
-(2.1 GHz, not the one of the table above); Stim is single-threaded.
+return shot-major NumPy arrays (detectors, observables), in one Python
+process: bool, or bit-packed with eight detectors per byte. qvd's time
+includes reading the text, and Stim's compiling its sampler. Measured on a
+4-vCPU Xeon virtual machine (2.1 GHz, not the one of the table above);
+Stim is single-threaded (`benchmarks/bench_output.py`,
+`results/output.csv`).
 
-| Distance | Qubits | Detectors | qvd, 4 vCPUs | qvd, 1 thread | Stim 1.16 `compile_detector_sampler().sample` | Same, `bit_packed=True` |
+| Distance | Detectors | qvd, 4 vCPUs | qvd, 1 thread | Stim 1.16 `compile_detector_sampler().sample` | qvd bit-packed, 4 vCPUs (1 thread) | Stim, `bit_packed=True` |
 |---|---|---|---|---|---|---|
-| 11 | 274 | 1,320 | 0.015 s | **0.013 s** | 0.049 s | 0.037 s |
-| 21 | 944 | 9,240 | **0.112 s** | 0.136 s | 0.560 s | 0.359 s |
-| 51 | 5,354 | 132,600 | **1.63 s** | 2.32 s | 9.92 s | 12.95 s |
+| 11 | 1,320 | 0.009 s | 0.012 s | 0.055 s | **0.009 s** (0.010 s) | 0.045 s |
+| 21 | 9,240 | 0.080 s | 0.179 s | 0.593 s | **0.052 s** (0.090 s) | 0.423 s |
+| 51 | 132,600 | 1.13 s | 1.97 s | 10.1 s | **0.99 s** (1.78 s) | 12.5 s |
+| 101 | 1,030,200 | — | — | — | **13.6 s** (34.0 s) | 303 s |
 
-qvd is 2.6–4.3× faster than the faster of Stim's two outputs on one
-thread, and 3.2–6.1× on 4 vCPUs from d = 21 up. Distance 101 is left out:
-its shot-major result alone is 10 GB in either simulator, on a 15 GB
-machine. qvd has no bit-packed shot-major output yet.
+With bool arrays, qvd is 2.4–5.1× faster than the faster of Stim's two
+outputs on one thread, and 5.0–9.0× on 4 vCPUs. Bit-packed against
+bit-packed, it is 4.5–8.9× faster on one thread and 5.0–22.3× on 4 vCPUs.
+Stim's bit-packed output is slower than its bool output at d = 51 (as in
+every run here), which widens the gap there. At d = 101 only the
+bit-packed outputs fit: the result is 1.3 GB, where a bool array would be
+10 GB on a 15 GB machine. The raw measurement records of `sample`
+(measurement-major in qvd, shot-major in Stim's `compile_sampler`) show
+the same: 0.72 s against Stim's 11.8 s at d = 51, and bit-packed at
+d = 101 7.9 s against 312 s (20.9 s on one thread).
 
 The statistics agree. 200,000 shots of each code, decoded by the same
 PyMatching decoder (built from Stim's detector error model),
@@ -413,6 +423,7 @@ from qevedo.simulator import sample_detectors
 circuit = stim.Circuit.generated("surface_code:rotated_memory_z", distance=5, rounds=5,
                                  after_clifford_depolarization=0.003)
 detectors, observables = sample_detectors(circuit, 100_000, seed=1)  # (100000, 120), (100000, 1)
+packed, _ = sample_detectors(circuit, 100_000, seed=1, bit_packed=True)  # (100000, 15) uint8
 ```
 
 See [python/README.md](python/README.md). The bindings are a PyO3 module
