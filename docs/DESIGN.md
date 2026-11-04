@@ -272,8 +272,9 @@ Stim; with 8 P-cores it is 3–8× faster.
 
 **Noise.** A Pauli noise channel (`Noise::Pauli1 { px, py, pz }` per
 qubit, which covers Stim's `X_ERROR`, `Y_ERROR`, `Z_ERROR`, `DEPOLARIZE1`
-and `PAULI_CHANNEL_1`, and `Noise::Depolarize2(p)` per pair) puts a random
-Pauli error on a shot. A Pauli error only multiplies the shot's frame, so
+and `PAULI_CHANNEL_1`, `Noise::Depolarize2(p)` and `Noise::Pauli2` per
+pair for `DEPOLARIZE2` and `PAULI_CHANNEL_2`, and `Noise::Correlated` for
+Stim's correlated errors) puts a random Pauli error on a shot. A Pauli error only multiplies the shot's frame, so
 the reference shot ignores noise altogether and each frame XORs in its own
 errors, exactly as in Stim. Three details make it cheap:
 - *Gaps, not coin flips.* Within a 64-shot word, the shots × targets of a
@@ -314,15 +315,38 @@ measurement, in Stim's `rec` order, unrolling `REPEAT` blocks, and keeps
 the detectors and observables as lists of measurements. Measurement and
 reset bases other than Z become basis changes around `M` and `R`
 (`MX` = H M H, `MY` = S† H M H S), so the sampler itself did not change.
-Anything it cannot run exactly (`MPP`, correlated or heralded errors,
-classically controlled gates, sweep bits) is an error naming the line,
-never skipped. Three details:
+Anything it cannot run exactly (heralded errors, two-qubit parity
+measurements such as `MXX`, classically controlled gates, sweep bits) is
+an error naming the line, never skipped. Five details:
 - *Detection events are relative to the reference shot.* A detector fires
   when its measurements' parity differs from the noiseless circuit's, as in
   Stim. The sampler's reference shot is that noiseless run, so
   `sample_detectors` XORs each detector's rows of the measurement record
   and inverts the row when the reference parity is odd. Inverted results
   (`M !q`) change a measurement and its reference alike and cancel.
+- *`MPP` as gates.* A Pauli product measurement `P1 ⊗ … ⊗ Pk` becomes
+  the rotations that take each `Pi` to Z (those of `MX` and `MY`), CX
+  gates from the first k − 1 qubits onto the last, a Z measurement of the
+  last, and the same gates undone. The CX ladder maps `Z_last` to `Z_1 …
+  Z_k`, so the reference shot measures the product on the tableau, and in
+  the frames the random Z put on the measured qubit afterwards becomes the
+  random product that Stim applies after an `MPP`. Neither the tableau nor
+  the frame loop changed. Checked against Stim on 300 random circuits in
+  the Python tests (same affine space of outcomes, same per-bit rates)
+  and in the Rust tests against the reference state vector (±1 eigenstates always give their
+  sign, other states a fair coin).
+- *Correlated errors as one channel.* `E(p1) P1` followed by
+  `ELSE_CORRELATED_ERROR(p2) P2`, … applies at most one product per shot,
+  `Pi` with probability `pi ∏_{j<i}(1 − pj)`. The reader merges a chain
+  into one `Noise::Correlated` over the union of its qubits, products
+  padded with `I`, holding those unconditional probabilities. It is then a
+  channel like any other: one geometric gap draw finds the next shot with
+  an error, a second draw picks the product. Annotations may come between
+  the lines of a chain; anything else ends it, and an
+  `ELSE_CORRELATED_ERROR` with no chain to extend is an error.
+  `PAULI_CHANNEL_2` is sampled the same way over its 15 Paulis. Both are
+  picked in a function kept out of line, so the loop of the common
+  channels is unchanged.
 - *Measurement flips after the run.* `M(p)` flips the recorded result,
   not the state. Each Stim measurement has its own classical bit and
   nothing reads the record during the run, so the flips are drawn after
@@ -763,9 +787,9 @@ remain (79 of its 87 s at 5 steps, θ_h = 1.2).
   reduce the SWAPs.
 - **Noise beyond the stabilizer backend, and more of Stim's format.** The
   near-Clifford backend's per-shot frames could take Pauli noise the same
-  way. The Stim reader lacks `MPP`, `PAULI_CHANNEL_2`, correlated and
-  heralded errors, classical control from measurement records and sweep
-  bits, and `to_stim` does not write detectors. `sample_detectors` keeps
+  way. The Stim reader lacks heralded errors, `MXX`/`MYY`/`MZZ` and
+  `SPP`, classical control from measurement records and sweep bits, and
+  `to_stim` does not write detectors. `sample_detectors` keeps
   every measurement record in memory (one bit per measurement and shot)
   before reducing them to detectors. Sampling detectors directly, with a cost that
   does not grow with the measurements (the Stim paper notes such a method

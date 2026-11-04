@@ -1,12 +1,15 @@
 //! The Stim-format reader and detector sampling: parsing (blocks,
 //! records, errors), the gates' conventions against Stim's Pauli tables,
-//! and detection events against rates computed by hand.
+//! detection events against rates computed by hand, Pauli product
+//! measurements (`MPP`) against the reference state vector, and
+//! `PAULI_CHANNEL_2` and correlated errors against Stim's definitions.
 
 mod common;
 
 use qvd::stabilizer::{self, sample_detectors, sample_stim};
 use qvd::stim::parse;
-use qvd::{Gate, Instruction, Matrix};
+use qvd::{C64, Gate, Instruction, Matrix, Noise, reference};
+use rand::RngExt;
 
 #[test]
 fn parses_blocks_records_and_annotations() {
@@ -49,8 +52,25 @@ OBSERVABLE_INCLUDE(1) rec[-2] rec[-3]
 fn errors_name_the_line() {
     for (text, message) in [
         (
-            "H 0\nMPP X0*X1\n",
-            "line 2: Stim instruction MPP is not supported",
+            "H 0\nMXX 0 1\n",
+            "line 2: Stim instruction MXX is not supported",
+        ),
+        ("MPP X0*Z0\n", "line 1: MPP: qubit 0 appears twice"),
+        ("MPP 0 1\n", "line 1: MPP takes Pauli products"),
+        ("H X0\n", "line 1: H takes qubit targets, not Paulis"),
+        ("E(0.1) 0 1\n", "line 1: E takes Pauli targets"),
+        ("E(0.1) X0 Z0\n", "line 1: E names qubit 0 twice"),
+        (
+            "H 0\nELSE_CORRELATED_ERROR(0.1) X0\n",
+            "line 2: ELSE_CORRELATED_ERROR must follow E",
+        ),
+        (
+            "E(0.1) X0\nH 0\nELSE_CORRELATED_ERROR(0.1) X0\n",
+            "line 3: ELSE_CORRELATED_ERROR must follow E",
+        ),
+        (
+            "PAULI_CHANNEL_2(0.1) 0 1\n",
+            "line 1: PAULI_CHANNEL_2 takes 15 probability",
         ),
         (
             "M 0\nCX rec[-1] 1\n",
@@ -399,4 +419,242 @@ fn every_output_layout_holds_the_same_bits() {
         // Some detectors fired, or the comparison would prove little.
         assert!(bytes.contains(&1) || shots < 64);
     }
+}
+
+/// `<ψ|P|ψ>` for the state of the unitary `prefix` and the Pauli product
+/// `factors` (letter, qubit), from the reference state vector.
+fn pauli_expectation(prefix: &qvd::Circuit, factors: &[(u8, usize)]) -> f64 {
+    let state = reference::statevector(prefix);
+    let mut moved = state.clone();
+    for &(pauli, q) in factors {
+        let gate = match pauli {
+            b'X' => Gate::X,
+            b'Y' => Gate::Y,
+            _ => Gate::Z,
+        };
+        reference::apply(&mut moved, &gate.matrix(), &[q]);
+    }
+    let overlap: C64 = state.iter().zip(&moved).map(|(a, b)| a.conj() * b).sum();
+    overlap.re
+}
+
+#[test]
+fn mpp_measures_pauli_products_as_the_state_vector_predicts() {
+    // Random Clifford circuits, then one MPP of a random product: when the
+    // state is an eigenstate of the product (expectation ±1), every shot
+    // reads that sign (1 for -1, flipped again by `!`); otherwise the
+    // expectation is 0 and the result is a fair coin.
+    let mut rng = common::rng(11);
+    let one = ["H", "S", "S_DAG", "SQRT_X", "SQRT_Y", "H_YZ", "C_XYZ"];
+    let two = ["CX", "CZ", "CY", "SWAP"];
+    let (mut deterministic, mut random) = (0, 0);
+    for _ in 0..200 {
+        let n = rng.random_range(2..6usize);
+        let mut text = String::new();
+        for _ in 0..rng.random_range(0..12) {
+            if rng.random::<bool>() {
+                let g = one[rng.random_range(0..one.len())];
+                text += &format!("{g} {}\n", rng.random_range(0..n));
+            } else {
+                let q = common::random_qubits(&mut rng, n, 2);
+                let g = two[rng.random_range(0..two.len())];
+                text += &format!("{g} {} {}\n", q[0], q[1]);
+            }
+        }
+        let prefix = parse(&text).unwrap().circuit;
+        let k = rng.random_range(1..=n);
+        let qubits = common::random_qubits(&mut rng, n, k);
+        let factors: Vec<(u8, usize)> = qubits
+            .iter()
+            .map(|&q| (b"XYZ"[rng.random_range(0..3)], q))
+            .collect();
+        let inverted = rng.random::<bool>();
+        let product: Vec<String> = factors
+            .iter()
+            .map(|&(p, q)| format!("{}{q}", p as char))
+            .collect();
+        let bang = if inverted { "!" } else { "" };
+        text += &format!("MPP {bang}{}\n", product.join("*"));
+        let mut c = parse(&text).unwrap();
+        // Stim's qubit count is the largest named qubit + 1; pad the
+        // prefix to the same width.
+        let mut prefix = prefix;
+        prefix.num_qubits = c.circuit.num_qubits.max(prefix.num_qubits);
+        c.circuit.num_qubits = prefix.num_qubits;
+        let expectation = pauli_expectation(&prefix, &factors);
+        let samples = sample_stim(&c, 2000, Some(rng.random())).unwrap();
+        let ones = (0..2000).filter(|&s| samples.get(s, 0)).count();
+        if (expectation.abs() - 1.0).abs() < 1e-9 {
+            deterministic += 1;
+            let expected = (expectation < 0.0) != inverted;
+            assert_eq!(ones, if expected { 2000 } else { 0 }, "{text}");
+        } else {
+            random += 1;
+            assert!(expectation.abs() < 1e-9, "{text}: {expectation}");
+            assert!((850..1150).contains(&ones), "{text}: {ones}");
+        }
+    }
+    assert!(
+        deterministic > 15 && random > 100,
+        "{deterministic} {random}"
+    );
+}
+
+#[test]
+fn mpp_on_a_bell_pair_and_its_flips() {
+    // |Φ+> is stabilized by XX, -YY and ZZ; Z0 Z1 measured twice agrees
+    // with itself, and X0 alone is random. MPP(p) flips the record only.
+    let text = "H 0\nCX 0 1\nMPP X0*X1 Y0*Y1 Z0*Z1 !Z1*Z0\nMPP(0.1) Z0*Z1\nMPP X0\nM 0 1\n";
+    let c = parse(text).unwrap();
+    assert_eq!(c.num_measurements(), 8);
+    assert_eq!(c.flips, vec![(4, 0.1)]);
+    let shots = 40_000;
+    let samples = sample_stim(&c, shots, Some(3)).unwrap();
+    let count = |m: usize| (0..shots).filter(|&s| samples.get(s, m)).count();
+    assert_eq!(
+        [count(0), count(1), count(2), count(3)],
+        [0, shots, 0, shots]
+    );
+    let flipped = count(4) as f64 / shots as f64;
+    assert!((flipped - 0.1).abs() < 0.006, "{flipped}");
+    let x0 = count(5) as f64 / shots as f64;
+    assert!((x0 - 0.5).abs() < 0.02, "{x0}");
+    // Measuring X0 leaves a state stabilized by X0 and X1 (XX times X0),
+    // so the final Z measurements are fair coins.
+    let (m0, m1) = (
+        count(6) as f64 / shots as f64,
+        count(7) as f64 / shots as f64,
+    );
+    assert!(
+        (m0 - 0.5).abs() < 0.02 && (m1 - 0.5).abs() < 0.02,
+        "{m0} {m1}"
+    );
+}
+
+#[test]
+fn pauli_channel_2_follows_stims_order() {
+    // With one of the 15 probabilities at 1: qubits 0, 1 start in |0>
+    // and show X components in Z measurements; qubits 2, 3 start in |+>
+    // and show Z components in X measurements. Stim's order is IX, IY,
+    // IZ, XI, ..., ZZ with the first letter on the first qubit of a pair.
+    let letters = ['I', 'X', 'Y', 'Z'];
+    for k in 0..15 {
+        let mut p = vec!["0"; 15];
+        p[k] = "1";
+        let text = format!(
+            "R 0 1\nRX 2 3\nPAULI_CHANNEL_2({}) 0 1 2 3\nM 0 1\nMX 2 3\n",
+            p.join(",")
+        );
+        let c = parse(&text).unwrap();
+        let samples = sample_stim(&c, 64, Some(k as u64)).unwrap();
+        let (a, b) = (letters[(k + 1) / 4], letters[(k + 1) % 4]);
+        let has_x = |l: char| l == 'X' || l == 'Y';
+        let has_z = |l: char| l == 'Z' || l == 'Y';
+        let expected = [has_x(a), has_x(b), has_z(a), has_z(b)];
+        for (m, &bit) in expected.iter().enumerate() {
+            assert!(
+                (0..64).all(|s| samples.get(s, m) == bit),
+                "{a}{b}: measurement {m}"
+            );
+        }
+    }
+}
+
+#[test]
+fn correlated_error_chains_have_stims_rates() {
+    // E(0.2) X0 X1, then ELSE 0.25 on X1 X2, ELSE 0.5 on X0, a TICK, and
+    // ELSE 0.5 on X2: exactly one product or none, with probabilities
+    // 0.2, 0.8 * 0.25 = 0.2, 0.6 * 0.5 = 0.3, 0.3 * 0.5 = 0.15, and 0.15.
+    let text = "R 0 1 2\nE(0.2) X0 X1\nELSE_CORRELATED_ERROR(0.25) X1 X2\n\
+                ELSE_CORRELATED_ERROR(0.5) X0\nTICK\nELSE_CORRELATED_ERROR(0.5) X2\nM 0 1 2\n";
+    let c = parse(text).unwrap();
+    let noise: Vec<&Instruction> = c
+        .circuit
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, Instruction::Noise { .. }))
+        .collect();
+    assert_eq!(noise.len(), 1, "one chain, one channel");
+    let shots = 200_000;
+    let samples = sample_stim(&c, shots, Some(8)).unwrap();
+    let mut counts = [0usize; 8];
+    for s in 0..shots {
+        let key = (0..3).fold(0, |k, m| k * 2 + samples.get(s, m) as usize);
+        counts[key] += 1;
+    }
+    // Keys read qubit 0 as the high bit: XX on 0, 1 is 0b110.
+    let expected = [
+        (0b110, 0.2),
+        (0b011, 0.2),
+        (0b100, 0.3),
+        (0b001, 0.15),
+        (0, 0.15),
+    ];
+    for (key, p) in expected {
+        let rate = counts[key] as f64 / shots as f64;
+        let sigma = (p * (1.0 - p) / shots as f64).sqrt();
+        assert!((rate - p).abs() < 5.0 * sigma, "{key:03b}: {rate} vs {p}");
+    }
+    let others: usize = [0b010, 0b101, 0b111].iter().map(|&k| counts[k]).sum();
+    assert_eq!(others, 0);
+    // Two separate chains are independent: XX on (0, 1), and Y on 2
+    // (which a Z measurement sees).
+    let c = parse("R 0 1 2\nE(0.5) X0 X1\nE(0.5) Y2\nM 0 1 2\n").unwrap();
+    let samples = sample_stim(&c, shots, Some(9)).unwrap();
+    let both = (0..shots)
+        .filter(|&s| samples.get(s, 0) && samples.get(s, 1) && samples.get(s, 2))
+        .count() as f64
+        / shots as f64;
+    assert!((both - 0.25).abs() < 0.005, "{both}");
+}
+
+#[test]
+fn new_channels_round_trip_through_to_stim() {
+    // PAULI_CHANNEL_2 keeps its name and arguments; a correlated chain is
+    // written back as E and ELSE_CORRELATED_ERROR with conditional
+    // probabilities, and reads back as the same channel.
+    let mut p = [0.0; 15];
+    for (k, v) in p.iter_mut().enumerate() {
+        *v = 0.001 * (k + 1) as f64;
+    }
+    let text = format!(
+        "PAULI_CHANNEL_2({}) 0 1\nE(0.1) X0 Z2\nELSE_CORRELATED_ERROR(0.2) Y1\nE(0.3) Z1\nM 0 1 2\n",
+        p.map(|v| v.to_string()).join(",")
+    );
+    let first = parse(&text).unwrap();
+    let written = stabilizer::to_stim(&first.circuit).unwrap();
+    assert!(
+        written.contains("E(0.1) X0 Z2\nELSE_CORRELATED_ERROR(0.2"),
+        "{written}"
+    );
+    assert!(written.contains("\nE(0.3) Z1\n"), "{written}");
+    let second = parse(&written).unwrap();
+    let channels = |c: &qvd::Circuit| -> Vec<(Noise, Vec<usize>)> {
+        c.instructions
+            .iter()
+            .filter_map(|i| match i {
+                Instruction::Noise { channel, qubits } => Some((channel.clone(), qubits.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    let (a, b) = (channels(&first.circuit), channels(&second.circuit));
+    assert_eq!(a.len(), 3);
+    assert_eq!(a[0], b[0]);
+    for ((ca, qa), (cb, qb)) in a[1..].iter().zip(&b[1..]) {
+        assert_eq!(qa, qb);
+        let (Noise::Correlated(pa), Noise::Correlated(pb)) = (ca, cb) else {
+            panic!("{ca:?} {cb:?}");
+        };
+        for ((x, sa), (y, sb)) in pa.iter().zip(pb) {
+            assert_eq!(sa, sb);
+            assert!((x - y).abs() < 1e-15);
+        }
+    }
+    // The second product's unconditional probability: 0.9 * 0.2.
+    let Noise::Correlated(products) = &a[1].0 else {
+        unreachable!()
+    };
+    assert_eq!(products[0], (0.1, "XZI".to_string()));
+    assert!((products[1].0 - 0.18).abs() < 1e-15 && products[1].1 == "IIY");
 }

@@ -19,21 +19,31 @@
 //!   `MRX`, `MRY`, `R` (`RZ`), `RX`, `RY` and `MPAD`. A measurement's
 //!   argument, as in `M(0.01)`, flips the recorded result with that
 //!   probability without disturbing the state; `M !q` records it inverted.
+//! - **Pauli product measurements:** `MPP X0*Y1*Z2 !Z3*Z4 ...`, with a
+//!   flip probability as `MPP(0.01)`. Each product becomes basis changes
+//!   to Z, a ladder of CX gates onto its last qubit, a Z measurement of
+//!   that qubit and the same gates undone: the measured qubit's Z is then
+//!   the product, so the reference shot measures it on the tableau and the
+//!   frames see its parity, as for any other measurement.
 //! - **Noise:** `X_ERROR`, `Y_ERROR`, `Z_ERROR`, `DEPOLARIZE1`,
-//!   `DEPOLARIZE2` and `PAULI_CHANNEL_1`.
+//!   `DEPOLARIZE2`, `PAULI_CHANNEL_1`, `PAULI_CHANNEL_2`, and correlated
+//!   errors: `E` (`CORRELATED_ERROR`) and `ELSE_CORRELATED_ERROR`. A chain
+//!   of `E` and the `ELSE_CORRELATED_ERROR` lines right after it is one
+//!   [`Noise::Correlated`] channel (at most one of its products happens),
+//!   with the unconditional probability of each product.
 //! - **Annotations:** `DETECTOR` and `OBSERVABLE_INCLUDE` with `rec[-k]`
 //!   targets; `TICK`, `QUBIT_COORDS` and `SHIFT_COORDS` are ignored
 //!   (coordinates do not change what is sampled).
 //! - **Blocks:** `REPEAT n { ... }`, nested, unrolled.
 //!
-//! Everything else (`MPP`, correlated and heralded errors, classically
-//! controlled gates such as `CX rec[-1] 0`, sweep bits, ...) is rejected
+//! Everything else (heralded errors, `MXX`/`MYY`/`MZZ` and `SPP`,
+//! classically controlled gates such as `CX rec[-1] 0`, sweep bits, ...) is rejected
 //! with the line it is on, rather than skipped: skipping an instruction
 //! would silently sample a different circuit.
 
 use std::f64::consts::FRAC_PI_2;
 
-use crate::circuit::{Circuit, Gate, Noise};
+use crate::circuit::{Circuit, Gate, Instruction, Noise};
 
 /// A circuit read from Stim's format.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -69,6 +79,16 @@ enum Target {
     Inverted(usize),
     /// `rec[-k]`: the `k`-th most recent measurement result.
     Record(usize),
+    /// A Pauli on a qubit, as in `E(p) X0 Z1` and `MPP X0*Y1`: the letter
+    /// (`b'X'`, `b'Y'` or `b'Z'`), the qubit, whether it was written `!X0`
+    /// (an inverted result), and whether `*` joins it to the next target
+    /// (one product of `MPP`).
+    Pauli {
+        pauli: u8,
+        qubit: usize,
+        inverted: bool,
+        joined: bool,
+    },
 }
 
 /// A parsed line, or a `REPEAT` block.
@@ -110,6 +130,11 @@ const OTHER_INSTRUCTIONS: &[&str] = &[
     "DEPOLARIZE1",
     "PAULI_CHANNEL_1",
     "DEPOLARIZE2",
+    "PAULI_CHANNEL_2",
+    "E",
+    "CORRELATED_ERROR",
+    "ELSE_CORRELATED_ERROR",
+    "MPP",
     "DETECTOR",
     "OBSERVABLE_INCLUDE",
 ];
@@ -126,6 +151,7 @@ pub fn parse(text: &str) -> Result<StimCircuit, String> {
             ..StimCircuit::default()
         },
         measurements: 0,
+        chain: None,
     };
     builder.run(&items)?;
     builder.out.circuit.num_clbits = builder.measurements;
@@ -172,17 +198,17 @@ fn parse_block(
             continue;
         }
         // Name an unsupported instruction before complaining about its
-        // targets (MPP's `X0*X1`, say).
+        // targets (`MXX`'s, say).
         if gate_sequence(&name).is_none() && !OTHER_INSTRUCTIONS.contains(&name.as_str()) {
             return Err(error(format!("Stim instruction {name} is not supported")));
         }
-        let targets = rest
-            .split_whitespace()
-            .map(parse_target)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(error)?;
+        let mut targets = Vec::new();
+        for word in rest.split_whitespace() {
+            parse_targets(word, &mut targets).map_err(error)?;
+        }
         for target in &targets {
-            if let Target::Qubit(q) | Target::Inverted(q) = *target {
+            if let Target::Qubit(q) | Target::Inverted(q) | Target::Pauli { qubit: q, .. } = *target
+            {
                 *max_qubit = Some(max_qubit.map_or(q, |m: usize| m.max(q)));
             }
         }
@@ -226,6 +252,55 @@ fn split_instruction(line: &str) -> Result<(String, Vec<f64>, &str), String> {
         return Ok((name, args, &inner[close + 1..]));
     }
     Ok((name, Vec::new(), rest))
+}
+
+/// Parse one whitespace-separated word of targets: a qubit, `!q`,
+/// `rec[-k]`, a Pauli target such as `X3` or `!Y3`, or a product of Pauli
+/// targets joined by `*` (`X0*!Y1*Z2`).
+fn parse_targets(word: &str, out: &mut Vec<Target>) -> Result<(), String> {
+    if word.contains('*') {
+        let factors: Vec<&str> = word.split('*').collect();
+        for (i, factor) in factors.iter().enumerate() {
+            match parse_pauli(factor) {
+                Some((pauli, qubit, inverted)) => out.push(Target::Pauli {
+                    pauli,
+                    qubit,
+                    inverted,
+                    joined: i + 1 < factors.len(),
+                }),
+                None => {
+                    return Err(format!(
+                        "'{factor}' in '{word}' is not a Pauli target such as X3"
+                    ));
+                }
+            }
+        }
+        return Ok(());
+    }
+    if let Some((pauli, qubit, inverted)) = parse_pauli(word) {
+        out.push(Target::Pauli {
+            pauli,
+            qubit,
+            inverted,
+            joined: false,
+        });
+        return Ok(());
+    }
+    out.push(parse_target(word)?);
+    Ok(())
+}
+
+/// `X3`, `y3` or `!Z3` as (letter, qubit, inverted).
+fn parse_pauli(word: &str) -> Option<(u8, usize, bool)> {
+    let (inverted, rest) = match word.strip_prefix('!') {
+        Some(rest) => (true, rest),
+        None => (false, word),
+    };
+    let pauli = rest.bytes().next()?.to_ascii_uppercase();
+    if !matches!(pauli, b'X' | b'Y' | b'Z') {
+        return None;
+    }
+    rest[1..].parse().ok().map(|q| (pauli, q, inverted))
 }
 
 fn parse_target(word: &str) -> Result<Target, String> {
@@ -293,6 +368,11 @@ fn basis(name: &str) -> (&'static [Gate], &'static [Gate]) {
 struct Builder {
     out: StimCircuit,
     measurements: usize,
+    /// While the last instruction (annotations aside) was `E` or
+    /// `ELSE_CORRELATED_ERROR`: the index of that chain's
+    /// [`Noise::Correlated`] instruction, which a following
+    /// `ELSE_CORRELATED_ERROR` extends.
+    chain: Option<usize>,
 }
 
 impl Builder {
@@ -309,9 +389,26 @@ impl Builder {
                     name,
                     args,
                     targets,
-                } => self
-                    .op(name, args, targets)
-                    .map_err(|e| format!("line {line}: {e}"))?,
+                } => {
+                    // Annotations do not touch the frames, so they do not
+                    // break a chain of correlated errors; anything else
+                    // ends it.
+                    let keeps_chain = matches!(
+                        name.as_str(),
+                        "E" | "CORRELATED_ERROR"
+                            | "ELSE_CORRELATED_ERROR"
+                            | "TICK"
+                            | "QUBIT_COORDS"
+                            | "SHIFT_COORDS"
+                            | "DETECTOR"
+                            | "OBSERVABLE_INCLUDE"
+                    );
+                    if !keeps_chain {
+                        self.chain = None;
+                    }
+                    self.op(name, args, targets)
+                        .map_err(|e| format!("line {line}: {e}"))?
+                }
             }
         }
         Ok(())
@@ -327,6 +424,7 @@ impl Builder {
                 Target::Record(_) => Err(format!(
                     "{name} with measurement record targets (classical control) is not supported"
                 )),
+                Target::Pauli { .. } => Err(format!("{name} takes qubit targets, not Paulis")),
             })
             .collect()
     }
@@ -398,7 +496,7 @@ impl Builder {
                     let (q, inverted) = match *target {
                         Target::Qubit(q) => (q, false),
                         Target::Inverted(q) => (q, true),
-                        Target::Record(_) => {
+                        Target::Record(_) | Target::Pauli { .. } => {
                             return Err(format!("{name} takes qubit targets"));
                         }
                     };
@@ -494,6 +592,22 @@ impl Builder {
                     circuit.noise(Noise::Depolarize2(args[0]), &qubits);
                 }
             }
+            "PAULI_CHANNEL_2" => {
+                Self::probability(name, args, 15)?;
+                let qubits = Self::qubits(name, targets, false)?;
+                if !qubits.len().is_multiple_of(2) || qubits.chunks(2).any(|p| p[0] == p[1]) {
+                    return Err("PAULI_CHANNEL_2 needs pairs of distinct qubits".into());
+                }
+                if !qubits.is_empty() {
+                    let mut p = [0.0; 15];
+                    p.copy_from_slice(args);
+                    circuit.noise(Noise::Pauli2(Box::new(p)), &qubits);
+                }
+            }
+            "E" | "CORRELATED_ERROR" | "ELSE_CORRELATED_ERROR" => {
+                self.correlated(name, args, targets)?;
+            }
+            "MPP" => self.mpp(args, targets)?,
             "DETECTOR" => {
                 // Arguments are coordinates, which do not change sampling.
                 let records = self.records(name, targets)?;
@@ -512,6 +626,163 @@ impl Builder {
                 observables[index].extend(records);
             }
             _ => return Err(format!("Stim instruction {name} is not supported")),
+        }
+        Ok(())
+    }
+
+    /// The Pauli targets of a correlated error, as a product: its qubits
+    /// and one letter per qubit.
+    fn product(name: &str, targets: &[Target]) -> Result<(Vec<usize>, Vec<u8>), String> {
+        let mut qubits = Vec::new();
+        let mut letters = Vec::new();
+        for target in targets {
+            match *target {
+                Target::Pauli {
+                    pauli,
+                    qubit,
+                    inverted: false,
+                    joined: false,
+                } => {
+                    if qubits.contains(&qubit) {
+                        return Err(format!("{name} names qubit {qubit} twice"));
+                    }
+                    qubits.push(qubit);
+                    letters.push(pauli);
+                }
+                _ => return Err(format!("{name} takes Pauli targets such as X0 Z3")),
+            }
+        }
+        if qubits.is_empty() {
+            return Err(format!("{name} needs at least one Pauli target"));
+        }
+        Ok((qubits, letters))
+    }
+
+    /// `E(p) P` starts a chain; `ELSE_CORRELATED_ERROR(p) P` adds `P` to
+    /// the chain before it, happening with probability `p` in the shots
+    /// where no earlier product of the chain did. The chain is one
+    /// [`Noise::Correlated`] instruction over the union of its qubits,
+    /// each product padded with `I`, holding unconditional probabilities.
+    fn correlated(&mut self, name: &str, args: &[f64], targets: &[Target]) -> Result<(), String> {
+        Self::probability(name, args, 1)?;
+        let (qubits, letters) = Self::product(name, targets)?;
+        let p = args[0];
+        let circuit = &mut self.out.circuit;
+        if name != "ELSE_CORRELATED_ERROR" {
+            let paulis = String::from_utf8(letters).expect("ASCII letters");
+            circuit.noise(Noise::Correlated(vec![(p, paulis)]), &qubits);
+            self.chain = Some(circuit.instructions.len() - 1);
+            return Ok(());
+        }
+        let index = self.chain.ok_or(
+            "ELSE_CORRELATED_ERROR must follow E or ELSE_CORRELATED_ERROR \
+             (only annotations may come between)",
+        )?;
+        let Instruction::Noise {
+            channel: Noise::Correlated(products),
+            qubits: support,
+        } = &mut circuit.instructions[index]
+        else {
+            unreachable!("the chain points at a correlated error");
+        };
+        // New qubits join the support; earlier products get I on them.
+        for &q in &qubits {
+            if !support.contains(&q) {
+                support.push(q);
+                for (_, paulis) in products.iter_mut() {
+                    paulis.push('I');
+                }
+            }
+        }
+        let mut paulis = vec![b'I'; support.len()];
+        for (&q, &letter) in qubits.iter().zip(&letters) {
+            let at = support.iter().position(|&s| s == q).expect("just added");
+            paulis[at] = letter;
+        }
+        let taken: f64 = products.iter().map(|(q, _)| q).sum();
+        let unconditional = p * (1.0 - taken).max(0.0);
+        products.push((
+            unconditional,
+            String::from_utf8(paulis).expect("ASCII letters"),
+        ));
+        Ok(())
+    }
+
+    /// `MPP`: measure each Pauli product. For a product `P1 ⊗ ... ⊗ Pk`
+    /// on qubits `q1..qk`, each `qi` is rotated so that its `Pi` becomes
+    /// Z (`U_i† Z U_i = P_i`, the same rotations as `MX` and `MY`), CX
+    /// gates from `q1..q(k-1)` onto `qk` turn `Z_qk` into `Z_q1 ... Z_qk`,
+    /// and `qk` is measured in Z. Undoing the CX gates and the rotations
+    /// leaves the state as a direct product measurement would: in the
+    /// frames, the random Z put on `qk` after the measurement becomes the
+    /// measured product, which is what Stim applies after an `MPP`.
+    fn mpp(&mut self, args: &[f64], targets: &[Target]) -> Result<(), String> {
+        if args.len() > 1 {
+            return Err("MPP takes at most one argument".into());
+        }
+        Self::probability("MPP", args, args.len())?;
+        let flip = args.first().copied().unwrap_or(0.0);
+        let mut start = 0;
+        while start < targets.len() {
+            // The product: targets up to the first one not joined by `*`.
+            let mut end = start;
+            loop {
+                match targets[end] {
+                    Target::Pauli { joined: true, .. } if end + 1 < targets.len() => end += 1,
+                    Target::Pauli { joined: false, .. } => break,
+                    _ => return Err("MPP takes Pauli products such as X0*Y1*Z2".into()),
+                }
+            }
+            let mut factors = Vec::new();
+            let mut inverted = false;
+            for target in &targets[start..=end] {
+                if let Target::Pauli {
+                    pauli,
+                    qubit,
+                    inverted: bang,
+                    ..
+                } = *target
+                {
+                    if factors.iter().any(|&(_, q)| q == qubit) {
+                        return Err(format!("MPP: qubit {qubit} appears twice in one product"));
+                    }
+                    factors.push((pauli, qubit));
+                    inverted ^= bang;
+                }
+            }
+            start = end + 1;
+            let circuit = &mut self.out.circuit;
+            let rotation = |pauli: u8| match pauli {
+                b'X' => basis("MX"),
+                b'Y' => basis("MY"),
+                _ => basis("MZ"),
+            };
+            let (_, last) = *factors.last().expect("at least one factor");
+            for &(pauli, q) in &factors {
+                for gate in rotation(pauli).0 {
+                    circuit.gate(gate.clone(), &[q]);
+                }
+            }
+            for &(_, q) in &factors[..factors.len() - 1] {
+                circuit.gate(Gate::CX, &[q, last]);
+            }
+            let m = self.measurements;
+            circuit.measure(last, m);
+            self.measurements += 1;
+            for &(_, q) in factors[..factors.len() - 1].iter().rev() {
+                circuit.gate(Gate::CX, &[q, last]);
+            }
+            for &(pauli, q) in &factors {
+                for gate in rotation(pauli).1 {
+                    circuit.gate(gate.clone(), &[q]);
+                }
+            }
+            if flip > 0.0 {
+                self.out.flips.push((m, flip));
+            }
+            if inverted {
+                self.out.inverted.push(m);
+            }
         }
         Ok(())
     }

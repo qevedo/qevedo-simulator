@@ -27,7 +27,9 @@ Stim takes 37.5 s, with the same detection statistics. Stim's own
 circuit files run directly, detectors included: detection events of
 Stim's generated distance-51 surface code come out 9.0× faster than from
 Stim's detector sampler (5.1× on one thread), and bit-packed at
-distance 101 in 13.6 s against Stim's 303 s. Other circuits too large
+distance 101 in 13.6 s against Stim's 303 s; circuits that measure
+Pauli products directly (`MPP`) with correlated errors run too, 4.0–6.9×
+faster than Stim on a toric-code memory. Other circuits too large
 for a state vector run on a matrix product state backend, exact while the
 entanglement is low and approximate, with a fidelity estimate, beyond: it is
 1.6–14× faster than the faster of Qiskit Aer's and quimb's MPS simulators on
@@ -233,10 +235,68 @@ every gate against Stim's states, each measurement basis and `M(p)`
 against rates computed by hand, and detection events against the raw
 measurement records shot by shot.
 
-What is not there yet: `MPP`, correlated and heralded errors, classically
-controlled gates and sweep bits in the reader (each is an error naming
-the line, never skipped), writing detectors in `to_stim`, and noise on the
-other backends.
+**Pauli product measurements and correlated errors.** Some codes measure
+their stabilizers directly: Floquet codes such as the honeycomb code,
+lattice surgery, and measurement-only versions of the surface and toric
+codes are written with `MPP` (`MPP X0*X1 Z2*Z3*Z4*Z5`). Hardware noise
+models add two-qubit Pauli channels with uneven probabilities
+(`PAULI_CHANNEL_2`) and correlated errors (`E(p) X0 X1`, with
+`ELSE_CORRELATED_ERROR` for mutually exclusive alternatives). qvd reads
+all three. Each `MPP` product becomes rotations to Z, a CX ladder onto
+one of its qubits, a Z measurement and the same gates undone, so the
+reference shot and the frames need no new code. A chain of correlated
+errors becomes one channel with the unconditional probability of each
+product.
+
+`benchmarks/bench_mpp.py` builds a toric-code memory of this kind: L×L
+toric code, every stabilizer measured with `MPP(p)` for L rounds, with
+`DEPOLARIZE1`, a biased `PAULI_CHANNEL_2` on edge pairs and correlated
+`E`/`ELSE_CORRELATED_ERROR` chains on random pairs, p = 0.001, 10,000
+shots of detection events (shot-major bool), on the same 4-vCPU machine
+type as the table above:
+
+| L | Qubits | Detectors | qvd, 4 vCPUs | qvd, 1 thread | Stim 1.16 `compile_detector_sampler().sample` |
+|---|---|---|---|---|---|
+| 10 | 200 | 2,000 | 0.021 s | **0.019 s** | 0.083 s |
+| 20 | 800 | 16,000 | **0.162 s** | 0.173 s | 1.116 s |
+| 30 | 1,800 | 54,000 | **0.787 s** | 0.898 s | 4.310 s |
+
+qvd is 4.0–6.9× faster than Stim here (4.4–6.5× on one thread). Four
+threads gain at most 1.14× at these sizes (and lose 10% at L = 10).
+
+The statistics agree (`results/mpp_agreement.csv`, 200,000 shots each;
+every noiseless run gave no detection events at all):
+
+| Code | p | Detectors | Detection rate, qvd / Stim | Largest \|z\| over detectors | Logical error rate, qvd / Stim | \|z\| |
+|---|---|---|---|---|---|---|
+| L = 3, 3 rounds | 0.003 | 54 | 0.019126 / 0.018965 | 2.62 | 0.001095 / 0.001005 | 0.88 |
+| L = 5, 5 rounds | 0.002 | 250 | 0.012692 / 0.012665 | 2.61 | 0.000075 / 0.000010 | 3.15 |
+| L = 5, 5 rounds | 0.005 | 250 | 0.031039 / 0.031083 | 4.18 | 0.000380 / 0.000355 | 0.41 |
+| L = 7, 7 rounds | 0.003 | 686 | 0.018442 / 0.018460 | 3.17 | 0.000020 / 0.000010 | 0.82 |
+
+Two values in that table are large for chance: 15 logical failures
+against 2 at L = 5, p = 0.002, and one detector at |z| = 4.18. So the
+script's `--long` mode repeats the cases with millions of shots
+(`results/mpp_long.csv`). With 12 million shots per simulator at L = 5,
+the logical error rates are 0.0000314 / 0.0000359 (z = −1.90) at
+p = 0.002 and 0.0004027 / 0.0003862 (z = 2.03) at p = 0.005; with 4
+million at p = 0.01, 0.0122548 / 0.0121862 (z = 0.88) at L = 3 and
+0.0031688 / 0.0031325 (z = 0.91) at L = 5. The largest detector |z| is
+2.81–3.39, and the mean z² over detectors 0.99–1.05, except 1.44 over
+the 54 detectors at L = 3. No difference keeps its sign from one run to
+the next.
+The parts are checked exactly as well: in the Python tests, on 300
+random Clifford circuits with random `MPP` products, qvd's outcomes span
+the same affine space as Stim's with the same per-bit rates, and the Rust
+tests compare `MPP` against
+the reference state vector, `PAULI_CHANNEL_2`'s order against Stim's,
+and correlated chains and both channels against distributions summed
+exactly over every error.
+
+What is not there yet: heralded errors, `MXX`/`MYY`/`MZZ` and `SPP`,
+classically controlled gates and sweep bits in the reader (each is an
+error naming the line, never skipped), writing detectors in `to_stim`,
+and noise on the other backends.
 
 ### Low-entanglement circuits (MPS)
 
@@ -396,7 +456,8 @@ print(e.value, e.truncated_one_norm)   # value and a bound on its error
 ```
 
 Clifford circuits take Pauli noise channels (`x_error`, `y_error`,
-`z_error`, `pauli_channel_1`, `depolarize1`, `depolarize2`). `sample`
+`z_error`, `pauli_channel_1`, `depolarize1`, `depolarize2`,
+`pauli_channel_2`). `sample`
 returns the raw measurement records of every shot, and `to_stim` writes
 the same circuit for Stim:
 
@@ -496,9 +557,10 @@ std::fs::write("d25.stim", qvd::stabilizer::to_stim(&circuit).unwrap()).unwrap()
 ```
 
 `qvd::stim::parse` reads Stim's format (Clifford gates, `M`/`MX`/`MY`/`MR`
-with measurement-flip probabilities, resets, Pauli channels, `DETECTOR`,
-`OBSERVABLE_INCLUDE`, `REPEAT`), and `stabilizer::sample_detectors` samples
-its detection events:
+with measurement-flip probabilities, Pauli product measurements `MPP`,
+resets, Pauli channels including `PAULI_CHANNEL_2`, correlated errors `E`
+and `ELSE_CORRELATED_ERROR`, `DETECTOR`, `OBSERVABLE_INCLUDE`, `REPEAT`),
+and `stabilizer::sample_detectors` samples its detection events:
 
 ```rust
 let text = std::fs::read_to_string("surface_code.stim").unwrap();

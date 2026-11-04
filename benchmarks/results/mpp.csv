@@ -1,0 +1,10 @@
+size,rounds,qubits,measurements,detectors,p,shots,simulator,method,version,threads,seconds
+10,10,200,2200,2000,0.001,10000,qvd,sample_detectors,0.1.5,4,0.021
+10,10,200,2200,2000,0.001,10000,qvd,sample_detectors,0.1.5,1,0.019
+10,10,200,2200,2000,0.001,10000,stim,compile_detector_sampler().sample,1.16.0,1,0.083
+20,20,800,16800,16000,0.001,10000,qvd,sample_detectors,0.1.5,4,0.162
+20,20,800,16800,16000,0.001,10000,qvd,sample_detectors,0.1.5,1,0.173
+20,20,800,16800,16000,0.001,10000,stim,compile_detector_sampler().sample,1.16.0,1,1.116
+30,30,1800,55800,54000,0.001,10000,qvd,sample_detectors,0.1.5,4,0.787
+30,30,1800,55800,54000,0.001,10000,qvd,sample_detectors,0.1.5,1,0.898
+30,30,1800,55800,54000,0.001,10000,stim,compile_detector_sampler().sample,1.16.0,1,4.310

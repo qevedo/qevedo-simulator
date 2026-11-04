@@ -3,6 +3,99 @@
 One entry per improvement run: what changed, why, what it measured, and
 what to try next. Newest first.
 
+## 2026-11-04 — Pauli product measurements, PAULI_CHANNEL_2 and correlated errors (0.1.5)
+
+**What.**
+- The Stim reader takes `MPP` (products such as `X0*!Y1*Z2`, several per
+  line, with a flip probability `MPP(p)`). Each product becomes the
+  rotations of `MX`/`MY`, a CX ladder onto its last qubit, a Z
+  measurement and the same gates undone (`Builder::mpp`). The tableau and
+  the frame loop are unchanged.
+- Two new channels in `qvd::Noise`: `Pauli2` (`PAULI_CHANNEL_2`, boxed)
+  and `Correlated` (Pauli products with probabilities). The reader merges
+  `E` and the `ELSE_CORRELATED_ERROR` lines after it (annotations may
+  come between) into one `Correlated` over the union of their qubits,
+  with unconditional probabilities `p_i ∏_{j<i}(1 − p_j)`. `to_stim`
+  writes it back as the chain, and `PAULI_CHANNEL_2` under its own name.
+  `Frames::weighted_error` (out of line) picks a Pauli for both; the
+  common channels' loop did not change. `Noise::check` and
+  `Noise::probabilities` replace the copies of that validation in the
+  circuit builder and the bindings. `Noise` is no longer `Copy`.
+- `Circuit::pauli_channel_2` in Rust and Python.
+- Tests: `MPP` against the reference state vector on 200 random Clifford
+  circuits, a Bell pair, flips and inversions; `PAULI_CHANNEL_2`'s order;
+  ELSE chain rates; round trips through `to_stim`; reader errors. The
+  exact-distribution tests (summed over every error) now draw `Pauli2`
+  and `Correlated` channels too, and the rate test has a case for each.
+  Python: 300 random `MPP` circuits against Stim (same affine space of
+  outcomes, same per-bit rates); a toric code with all three features,
+  detector by detector against Stim, and silent without noise.
+- `benchmarks/bench_mpp.py` (`results/mpp*.csv`) and
+  `benchmarks/compare_examples.py` (`results/examples_before_after*.csv`).
+
+**Why.** Item 2 of the previous entry's list. These were the
+instructions most likely to stop a Stim file in qvd's reader. `MPP` is
+how Floquet codes (the honeycomb code), lattice surgery and
+measurement-only surface and toric codes are written. `PAULI_CHANNEL_2`
+and correlated errors are how calibrated, Pauli-twirled hardware noise
+models arrive. A search of recent stabilizer-simulation work (QuaSARQ,
+arXiv:2603.14641; Sdim, arXiv:2511.12777; STABSim, arXiv:2507.03092)
+found no new sampling method that beats reference-plus-frames on CPUs.
+So making more real circuits run, each checked exactly against Stim and
+a state vector, was the most valuable change that could be verified end
+to end today. Item 1 (noise on near-Clifford frames) serves fewer users.
+
+**Measured** (4-vCPU Xeon VM at 2.1 GHz, complete runs of both scripts).
+Toric-code memory with `MPP(p)`, `PAULI_CHANNEL_2` and E/ELSE chains,
+p = 0.001, 10,000 shots of detection events: L = 10 / 20 / 30, qvd on 4
+vCPUs 0.021 / 0.162 / 0.787 s, on 1 thread 0.019 / 0.173 / 0.898 s;
+Stim's detector sampler 0.083 / 1.116 / 4.310 s (4.0–6.9× on 4 vCPUs,
+4.4–6.5× on one thread). Agreement (200,000 shots): detection rates
+within sampling error, no detection event without noise; logical error
+rates |z| 0.41–0.88 except L = 5, p = 0.002 (15 against 2 failures,
+z = 3.15). The long runs (`mpp_long.csv`, 4–12 million shots per simulator): logical
+z = −1.90, 2.03, 0.88 and 0.91; largest detector |z| 2.81–3.39; mean
+detector z² 0.99–1.05, and 1.44 over the 54 detectors of L = 3,
+p = 0.01.
+
+No regression. `compare_examples.py`, 0.1.4 against this build,
+interleaved, 9 rounds: best-of ratios 0.885–1.046, every stabilizer and
+detector case 0.975–1.000. Three cases came out above 1.03 (pauliprop 20
+steps, 1.038; pauliprop 5 steps, 1.046 with median 1.079; mps QFT-100,
+1.046, 68 against 65 ms). Rerun with 25 rounds
+(`examples_before_after_recheck.csv`): 1.014, 0.977 and 0.970 (medians
+1.012, 1.018, 0.986). In an earlier, unrecorded
+pass, the same pauliprop cases came out 0.951 and 0.950. Their code does
+not touch noise, so these are VM noise.
+
+**Learned.**
+- Two slowdowns came from data size and inlining, not from the new code
+  paths. Storing the 15 probabilities inline tripled `Noise`'s size, and
+  so every `Instruction`'s (to 150 bytes): noiseless d = 51 sampling came
+  out 4–6% slower over 15–21 interleaved pairs. Boxing the array brought
+  `Noise` back to 32 bytes and `Instruction` to 64; a test now pins both.
+  Separately, `PendingNoise::add`, with the channel's clone, was inlined
+  into the reference shot's loop and grew it by 1 KB; `#[inline(never)]`
+  restored it.
+- In a statistics check with few events, |z| ≈ 3 happens. The first long
+  run (10 seeds, since replaced by the 30-seed run) gave logical z =
+  −2.94 and +3.46 at L = 5 (opposite signs);
+  unrecorded reruns with other seeds gave 0.83, −0.18, −1.89 and −1.65,
+  and at p = 0.01 (50,000 failures) −1.8 and +1.35. Pairwise detector
+  coincidences (ad hoc, all 1,485 pairs at L = 3, p = 0.01, 2 million
+  shots, with and without the new channels) showed mean z² 0.91–1.03.
+- My first random-circuit check compared sets of distinct outcomes,
+  which fails when there are more outcomes than shots; the affine span is
+  the right invariant.
+
+**Next.**
+1. Noise on the near-Clifford backend's per-shot frames (noisy
+   magic-state circuits).
+2. `MXX`/`MYY`/`MZZ`, `SPP` and heralded errors in the Stim reader, and
+   `to_stim` writing detectors and observables.
+3. Detection events without keeping every measurement record (memory at
+   d = 101 is dominated by the 1.3 GB record).
+
 ## 2026-11-02 — Results into NumPy without the Python-side work, and bit-packed detection events (0.1.4)
 
 **What.**

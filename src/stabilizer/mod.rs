@@ -263,8 +263,8 @@ impl Frames {
         self.x[r.clone()].swap_with_slice(&mut self.z[r]);
     }
 
-    /// Add the errors of a noise channel on `targets` (qubits, or pairs of
-    /// qubits for `Depolarize2`) to every shot's frame.
+    /// Add the errors of a noise channel on `targets` (qubits, or groups
+    /// of [`Noise::arity`] qubits) to every shot's frame.
     ///
     /// In each word, the 64 shots of every target form one run of
     /// `64 * targets` Bernoulli trials ("does this shot get an error on
@@ -275,7 +275,7 @@ impl Frames {
     // Kept out of line: inlined into the step loop it slowed noiseless
     // circuits down by a few percent.
     #[inline(never)]
-    fn noise(&mut self, channel: Noise, targets: &[usize]) {
+    fn noise(&mut self, channel: &Noise, targets: &[usize]) {
         let p = channel.probability();
         if p <= 0.0 {
             return;
@@ -299,7 +299,7 @@ impl Frames {
                 }
                 let (target, bit) = (next / 64, 1u64 << (next % 64));
                 match channel {
-                    Noise::Pauli1 { px, py, .. } => {
+                    &Noise::Pauli1 { px, py, .. } => {
                         // X, Y or Z in proportion to px, py, pz.
                         let r = rng.random::<f64>() * p;
                         let (x, z) = if r < px {
@@ -332,9 +332,89 @@ impl Frames {
                             }
                         }
                     }
+                    Noise::Pauli2(_) | Noise::Correlated(_) => {
+                        let r = rng.random::<f64>() * p;
+                        let group = &targets[arity * target..arity * (target + 1)];
+                        Self::weighted_error(
+                            &mut self.x,
+                            &mut self.z,
+                            words,
+                            w,
+                            bit,
+                            channel,
+                            r,
+                            group,
+                        );
+                    }
                 }
                 next += 1;
             }
+        }
+    }
+
+    /// The error of a [`Noise::Pauli2`] or [`Noise::Correlated`] channel
+    /// for a draw `r` uniform in `[0, probability)`: the first Pauli whose
+    /// cumulative probability exceeds `r`, XORed into one shot (`bit` of
+    /// word `w`) on the qubits of `group`. Out of line, so that the common
+    /// channels' loop stays as it was.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn weighted_error(
+        x: &mut [u64],
+        z: &mut [u64],
+        words: usize,
+        w: usize,
+        bit: u64,
+        channel: &Noise,
+        r: f64,
+        group: &[usize],
+    ) {
+        // Each Pauli as (x, z) bits per qubit of the group.
+        let mut flip = |q: usize, fx: bool, fz: bool| {
+            let i = q * words + w;
+            if fx {
+                x[i] ^= bit;
+            }
+            if fz {
+                z[i] ^= bit;
+            }
+        };
+        match channel {
+            Noise::Pauli2(p) => {
+                // Index k + 1 in Stim's order IX, IY, IZ, XI, ...: the
+                // first letter (qubit a) is (k + 1) / 4, the second
+                // (k + 1) % 4, each coded I, X, Y, Z = 0, 1, 2, 3.
+                let mut acc = 0.0;
+                // Rounding can leave r just above the last cumulative
+                // sum; it then lands on the last Pauli with weight.
+                let mut chosen = p.iter().rposition(|&q| q > 0.0).unwrap_or(0);
+                for (k, &q) in p.iter().enumerate() {
+                    acc += q;
+                    if r < acc {
+                        chosen = k;
+                        break;
+                    }
+                }
+                let code = chosen + 1;
+                for (q, letter) in [(group[0], code / 4), (group[1], code % 4)] {
+                    flip(q, letter == 1 || letter == 2, letter == 2 || letter == 3);
+                }
+            }
+            Noise::Correlated(products) => {
+                let mut acc = 0.0;
+                let mut chosen = products.iter().rposition(|(q, _)| *q > 0.0).unwrap_or(0);
+                for (k, (q, _)) in products.iter().enumerate() {
+                    acc += q;
+                    if r < acc {
+                        chosen = k;
+                        break;
+                    }
+                }
+                for (&q, c) in group.iter().zip(products[chosen].1.bytes()) {
+                    flip(q, c == b'X' || c == b'Y', c == b'Z' || c == b'Y');
+                }
+            }
+            Noise::Pauli1 { .. } | Noise::Depolarize2(_) => unreachable!("sampled inline"),
         }
     }
 
@@ -515,10 +595,13 @@ struct PendingNoise {
 }
 
 impl PendingNoise {
-    fn add(&mut self, channel: Noise, qubits: &[usize]) {
-        match self.groups.iter_mut().find(|(c, _)| *c == channel) {
+    // Out of line: inlined (with the channel's clone) into the reference
+    // shot's loop, it made noiseless d = 51 sampling 5% slower.
+    #[inline(never)]
+    fn add(&mut self, channel: &Noise, qubits: &[usize]) {
+        match self.groups.iter_mut().find(|(c, _)| c == channel) {
             Some((_, targets)) => targets.extend_from_slice(qubits),
-            None => self.groups.push((channel, qubits.to_vec())),
+            None => self.groups.push((channel.clone(), qubits.to_vec())),
         }
         for &q in qubits {
             self.noisy[q] = true;
@@ -642,7 +725,7 @@ fn sample_with_reference(
             }
             Instruction::Barrier { .. } => {}
             // The reference shot is noiseless; errors live in the frames.
-            Instruction::Noise { channel, qubits } => pending.add(*channel, qubits),
+            Instruction::Noise { channel, qubits } => pending.add(channel, qubits),
         }
     }
     pending.flush(&mut steps, &mut noises, &mut noise_targets);
@@ -693,7 +776,7 @@ fn sample_with_reference(
                     }
                     Step::Noise { index } => {
                         let step = &noises[index];
-                        frames.noise(step.channel, &noise_targets[step.start..step.end]);
+                        frames.noise(&step.channel, &noise_targets[step.start..step.end]);
                     }
                 }
             }
@@ -1077,8 +1160,10 @@ pub fn to_stim(circuit: &Circuit) -> Result<String, String> {
     // order, so this is the same circuit.
     let mut out = String::new();
     let mut line = String::new();
-    let mut emit = |head: String, targets: &mut dyn Iterator<Item = usize>| {
-        if !line.starts_with(&head) || line.as_bytes().get(head.len()) != Some(&b' ') {
+    // `merge` is false for lines that must stand alone: a correlated
+    // error's targets are one Pauli product, so two `E` lines are not one.
+    let mut emit = |head: String, targets: &mut dyn Iterator<Item = usize>, merge: bool| {
+        if !merge || !line.starts_with(&head) || line.as_bytes().get(head.len()) != Some(&b' ') {
             if !line.is_empty() {
                 out.push_str(&line);
                 out.push('\n');
@@ -1107,18 +1192,47 @@ pub fn to_stim(circuit: &Circuit) -> Result<String, String> {
                         Clifford::CZ(..) => "CZ",
                         Clifford::Swap(..) => "SWAP",
                     };
-                    emit(name.to_string(), &mut op.qubits());
+                    emit(name.to_string(), &mut op.qubits(), true);
                 }
             }
-            Instruction::Measure { qubit, .. } => emit("M".into(), &mut std::iter::once(*qubit)),
-            Instruction::Reset { qubit } => emit("R".into(), &mut std::iter::once(*qubit)),
+            Instruction::Measure { qubit, .. } => {
+                emit("M".into(), &mut std::iter::once(*qubit), true)
+            }
+            Instruction::Reset { qubit } => emit("R".into(), &mut std::iter::once(*qubit), true),
             Instruction::Barrier { .. } => {}
+            Instruction::Noise {
+                channel: Noise::Correlated(products),
+                qubits,
+            } => {
+                // Each group is a chain: E for the first product, then
+                // ELSE_CORRELATED_ERROR with the probability given that
+                // no earlier product of the chain happened.
+                for group in qubits.chunks(products[0].1.len()) {
+                    let mut taken = 0.0;
+                    for (k, (p, paulis)) in products.iter().enumerate() {
+                        let left = 1.0 - taken;
+                        let conditional = if left > 0.0 { (p / left).min(1.0) } else { 0.0 };
+                        taken += p;
+                        let mut text = format!(
+                            "{}({conditional:?})",
+                            if k == 0 { "E" } else { "ELSE_CORRELATED_ERROR" }
+                        );
+                        for (q, c) in group.iter().zip(paulis.chars()) {
+                            if c != 'I' {
+                                text.push_str(&format!(" {c}{q}"));
+                            }
+                        }
+                        emit(text, &mut std::iter::empty(), false);
+                    }
+                }
+            }
             Instruction::Noise { channel, qubits } => {
                 let (name, args) = channel.stim_name();
                 let args: Vec<String> = args.iter().map(|p| format!("{p:?}")).collect();
                 emit(
                     format!("{name}({})", args.join(", ")),
                     &mut qubits.iter().copied(),
+                    true,
                 );
             }
         }

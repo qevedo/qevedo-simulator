@@ -1,0 +1,4 @@
+case,rounds,before_seconds,after_seconds,best_of_ratio,median_paired_ratio
+mps qft 100,25,0.066,0.064,0.970,0.986
+pauliprop 20 steps 0.2,25,0.143,0.145,1.014,1.012
+pauliprop 5 steps 1.2,25,0.397,0.388,0.977,1.018

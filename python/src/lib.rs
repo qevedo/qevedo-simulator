@@ -57,15 +57,7 @@ impl PyCircuit {
 
     fn push_noise(&mut self, channel: Noise, qubits: &[usize]) -> PyResult<()> {
         self.check(qubits)?;
-        let probabilities = match channel {
-            Noise::Pauli1 { px, py, pz } => vec![px, py, pz],
-            Noise::Depolarize2(p) => vec![p],
-        };
-        if !probabilities.iter().all(|p| (0.0..=1.0).contains(p)) || channel.probability() > 1.0 {
-            return Err(value_error(
-                "noise probabilities must lie in [0, 1] and sum to at most 1",
-            ));
-        }
+        channel.check().map_err(value_error)?;
         self.inner.noise(channel, qubits);
         Ok(())
     }
@@ -309,6 +301,22 @@ impl PyCircuit {
         Ok(slf)
     }
 
+    /// The 15 non-identity Paulis on qubits `a` and `b` with the given
+    /// probabilities, in Stim's order `IX, IY, IZ, XI, XX, ..., ZZ` (the
+    /// first letter on `a`), as Stim's `PAULI_CHANNEL_2`.
+    fn pauli_channel_2(
+        mut slf: PyRefMut<'_, Self>,
+        a: usize,
+        b: usize,
+        probabilities: Vec<f64>,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        let p: [f64; 15] = probabilities
+            .try_into()
+            .map_err(|_| value_error("pauli_channel_2 takes 15 probabilities"))?;
+        slf.push_noise(Noise::Pauli2(Box::new(p)), &[a, b])?;
+        Ok(slf)
+    }
+
     /// Whether the circuit has noise channels (only the stabilizer backend
     /// runs those).
     fn has_noise(&self) -> bool {
@@ -323,7 +331,10 @@ impl PyCircuit {
 
     /// The instructions as `(name, qubits, params)` tuples; `params` holds
     /// the classical bit for measurements, is empty for unitaries, and holds
-    /// the probabilities of noise channels (named as in Stim, lower case).
+    /// the probabilities of noise channels (named as in Stim, lower case; a
+    /// chain of correlated errors read from Stim is `correlated_error` with
+    /// each product's unconditional probability, its Pauli products are in
+    /// `to_stim()`).
     fn instructions(&self) -> Vec<(String, Vec<usize>, Vec<f64>)> {
         self.inner
             .instructions

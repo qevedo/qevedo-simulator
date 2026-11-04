@@ -220,8 +220,9 @@ pub enum Instruction {
     Barrier {
         qubits: Vec<usize>,
     },
-    /// A Pauli noise channel on `qubits` (for [`Noise::Depolarize2`], on
-    /// consecutive pairs). Only the stabilizer backend runs noisy circuits.
+    /// A Pauli noise channel on `qubits` (for the two-qubit channels, on
+    /// consecutive pairs; for [`Noise::Correlated`], on consecutive groups
+    /// as long as its products). Only the stabilizer backend runs noisy circuits.
     Noise {
         channel: Noise,
         qubits: Vec<usize>,
@@ -232,7 +233,7 @@ pub enum Instruction {
 /// drawn independently in every shot. These are the channels of Stim's
 /// circuit-level noise models, and the stabilizer backend samples them
 /// exactly by adding the errors to each shot's Pauli frame.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Noise {
     /// On each qubit independently: X with probability `px`, Y with `py`,
     /// Z with `pz` (`X_ERROR`, `Y_ERROR`, `Z_ERROR`, `DEPOLARIZE1` and
@@ -241,27 +242,61 @@ pub enum Noise {
     /// On each pair of qubits: each of the 15 non-identity two-qubit Paulis
     /// with probability `p / 15` (`DEPOLARIZE2` in Stim).
     Depolarize2(f64),
+    /// On each pair of qubits: the 15 non-identity two-qubit Paulis with
+    /// their own probabilities, in Stim's order `IX, IY, IZ, XI, XX, XY,
+    /// XZ, YI, ..., ZZ`, the first letter on the first qubit of the pair
+    /// (`PAULI_CHANNEL_2` in Stim). Hardware noise models are often given
+    /// in this form, from Pauli twirling of a calibrated two-qubit gate.
+    /// Boxed, so that `Noise` (and every [`Instruction`]) stays as small
+    /// as before: a larger instruction made noiseless sampling ~4% slower.
+    Pauli2(Box<[f64; 15]>),
+    /// On each group of qubits (as many as the strings are long): at most
+    /// one of several Pauli products, product `i` with probability `p_i`,
+    /// the products written as strings of `I`, `X`, `Y` and `Z`, one letter
+    /// per qubit of the group. These are Stim's correlated errors: `E(p) X0
+    /// Z3` is the single product `XZ` on qubits 0 and 3, and a chain
+    /// `E(p1) P1; ELSE_CORRELATED_ERROR(p2) P2; ...` is the products
+    /// `P1, P2, ...` with the unconditional probabilities `p1`,
+    /// `(1 - p1) p2`, ... (so the `p_i` here sum to at most 1).
+    Correlated(Vec<(f64, String)>),
 }
 
 impl Noise {
-    /// The probability that the channel applies any error (to one qubit,
-    /// or to one pair for `Depolarize2`).
+    /// The probability that the channel applies any error (to one target:
+    /// one qubit, or one group of [`arity`](Self::arity) qubits).
     pub fn probability(&self) -> f64 {
-        match *self {
+        match self {
             Noise::Pauli1 { px, py, pz } => px + py + pz,
-            Noise::Depolarize2(p) => p,
+            Noise::Depolarize2(p) => *p,
+            Noise::Pauli2(p) => p.iter().sum(),
+            Noise::Correlated(products) => products.iter().map(|(p, _)| p).sum(),
         }
     }
 
-    /// Qubits per target: 1, or 2 for `Depolarize2`.
+    /// The probabilities the channel is given by: each must lie in [0, 1].
+    pub fn probabilities(&self) -> Vec<f64> {
+        match self {
+            Noise::Pauli1 { px, py, pz } => vec![*px, *py, *pz],
+            Noise::Depolarize2(p) => vec![*p],
+            Noise::Pauli2(p) => p.to_vec(),
+            Noise::Correlated(products) => products.iter().map(|(p, _)| *p).collect(),
+        }
+    }
+
+    /// Qubits per target: 1, 2 for the two-qubit channels, and the length
+    /// of the products for `Correlated`.
     pub fn arity(&self) -> usize {
         match self {
             Noise::Pauli1 { .. } => 1,
-            Noise::Depolarize2(_) => 2,
+            Noise::Depolarize2(_) | Noise::Pauli2(_) => 2,
+            Noise::Correlated(products) => products.first().map_or(1, |(_, s)| s.len()),
         }
     }
 
-    /// Stim's name and arguments for the channel.
+    /// Stim's name and arguments for the channel. A `Correlated` channel
+    /// is named `CORRELATED_ERROR` with its products' probabilities here;
+    /// [`crate::stabilizer::to_stim`] writes it as a chain of `E` and
+    /// `ELSE_CORRELATED_ERROR` lines.
     pub fn stim_name(&self) -> (&'static str, Vec<f64>) {
         match *self {
             Noise::Pauli1 { px, py, pz } => match (px, py, pz) {
@@ -272,7 +307,40 @@ impl Noise {
                 _ => ("PAULI_CHANNEL_1", vec![px, py, pz]),
             },
             Noise::Depolarize2(p) => ("DEPOLARIZE2", vec![p]),
+            Noise::Pauli2(ref p) => ("PAULI_CHANNEL_2", p.to_vec()),
+            Noise::Correlated(_) => ("CORRELATED_ERROR", self.probabilities()),
         }
+    }
+
+    /// Why the channel is malformed, if it is: probabilities outside
+    /// [0, 1] or summing past 1, or products that are empty, of different
+    /// lengths, or not made of `I`, `X`, `Y` and `Z`.
+    pub fn check(&self) -> Result<(), String> {
+        let probabilities = self.probabilities();
+        // A little slack for sums computed in floating point (the
+        // unconditional probabilities of a long ELSE chain).
+        if !probabilities.iter().all(|p| (0.0..=1.0).contains(p))
+            || self.probability() > 1.0 + 1e-12
+        {
+            return Err(format!(
+                "noise probabilities must lie in [0, 1] and sum to at most 1: {self:?}"
+            ));
+        }
+        if let Noise::Correlated(products) = self {
+            let k = self.arity();
+            if products.is_empty() || k == 0 {
+                return Err("a correlated error needs at least one non-empty Pauli product".into());
+            }
+            for (_, s) in products {
+                if s.len() != k || !s.bytes().all(|c| matches!(c, b'I' | b'X' | b'Y' | b'Z')) {
+                    return Err(format!(
+                        "the Pauli products of a correlated error must be strings of I, X, Y and Z \
+                         of the same length: {self:?}"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -391,26 +459,24 @@ impl Circuit {
         self
     }
 
-    /// Add a noise channel on `qubits` (pairs of qubits for
-    /// [`Noise::Depolarize2`]).
+    /// Add a noise channel on `qubits` (pairs of qubits for the two-qubit
+    /// channels, groups as long as the products for [`Noise::Correlated`]).
     pub fn noise(&mut self, channel: Noise, qubits: &[usize]) -> &mut Self {
-        let probabilities = match channel {
-            Noise::Pauli1 { px, py, pz } => vec![px, py, pz],
-            Noise::Depolarize2(p) => vec![p],
-        };
-        assert!(
-            probabilities.iter().all(|p| (0.0..=1.0).contains(p)) && channel.probability() <= 1.0,
-            "noise probabilities must lie in [0, 1] and sum to at most 1: {channel:?}"
-        );
+        if let Err(e) = channel.check() {
+            panic!("{e}");
+        }
         assert!(qubits.iter().all(|&q| q < self.num_qubits));
+        let arity = channel.arity();
         assert!(
-            qubits.len().is_multiple_of(channel.arity()),
-            "{channel:?} acts on pairs of qubits"
+            qubits.len().is_multiple_of(arity),
+            "{channel:?} acts on groups of {arity} qubits"
         );
-        if channel.arity() == 2 {
+        if arity > 1 {
             assert!(
-                qubits.chunks(2).all(|p| p[0] != p[1]),
-                "the qubits of a pair must differ"
+                qubits
+                    .chunks(arity)
+                    .all(|g| (1..g.len()).all(|i| !g[..i].contains(&g[i]))),
+                "the qubits of a group must differ"
             );
         }
         self.instructions.push(Instruction::Noise {
@@ -472,6 +538,13 @@ impl Circuit {
     /// Each non-identity two-qubit Pauli with probability `p / 15`.
     pub fn depolarize2(&mut self, a: usize, b: usize, p: f64) -> &mut Self {
         self.noise(Noise::Depolarize2(p), &[a, b])
+    }
+
+    /// The 15 non-identity Paulis on qubits `a` and `b` with probabilities
+    /// `p`, in Stim's order (`IX, IY, IZ, XI, ..., ZZ`, the first letter on
+    /// `a`), as `PAULI_CHANNEL_2`.
+    pub fn pauli_channel_2(&mut self, a: usize, b: usize, p: [f64; 15]) -> &mut Self {
+        self.noise(Noise::Pauli2(Box::new(p)), &[a, b])
     }
 
     /// Whether the circuit contains noise channels.
@@ -547,6 +620,15 @@ impl Circuit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn noise_keeps_instructions_small() {
+        // The stabilizer backend walks hundreds of thousands of
+        // instructions per circuit; a 15-probability channel stored inline
+        // tripled their size and slowed noiseless sampling down.
+        assert!(std::mem::size_of::<Noise>() <= 32);
+        assert!(std::mem::size_of::<Instruction>() <= 64);
+    }
 
     fn is_unitary(m: &Matrix) -> bool {
         m.mul(&m.adjoint()).distance(&Matrix::identity(m.qubits())) < 1e-12

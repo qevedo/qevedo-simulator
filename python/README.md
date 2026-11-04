@@ -36,8 +36,8 @@ print(e.value, e.truncated_one_norm)  # 1.5, and a bound on its error (0)
 ```
 
 Clifford circuits can carry Pauli noise channels (`x_error`, `y_error`,
-`z_error`, `pauli_channel_1`, `depolarize1`, `depolarize2`, Stim's
-channels), sampled independently in every shot by the stabilizer backend.
+`z_error`, `pauli_channel_1`, `depolarize1`, `depolarize2`,
+`pauli_channel_2`, Stim's channels), sampled independently in every shot by the stabilizer backend.
 `sample` returns the raw measurement records, measurement-major like Stim's
 `FlipSimulator`, and `to_stim` writes the same circuit for Stim:
 
@@ -79,9 +79,14 @@ are written by Rust into the array's memory, without a copy in Python.
 
 The reader takes Stim's Clifford gates, `M`/`MX`/`MY`/`MR`/`MRX`/`MRY`
 with measurement-flip probabilities (`M(0.01)`) and inverted targets
-(`M !3`), `R`/`RX`/`RY`, `MPAD`, the Pauli channels, `DETECTOR`,
-`OBSERVABLE_INCLUDE` and nested `REPEAT` blocks; anything else (`MPP`,
-correlated errors, classical control, ...) is an error naming the line.
+(`M !3`), `R`/`RX`/`RY`, `MPAD`, Pauli product measurements (`MPP
+X0*Y1*Z2`, `MPP(0.01) !Z3*Z4`), the Pauli channels including
+`PAULI_CHANNEL_2`, correlated errors (`E`, `ELSE_CORRELATED_ERROR`),
+`DETECTOR`, `OBSERVABLE_INCLUDE` and nested `REPEAT` blocks; anything else
+(heralded errors, `MXX`/`MZZ`, classical control, ...) is an error naming
+the line. A chain of correlated errors read from Stim appears in
+`instructions()` as one `correlated_error` with each product's
+unconditional probability; `to_stim()` writes it back as the chain.
 
 `run` chooses the simulation method automatically:
 

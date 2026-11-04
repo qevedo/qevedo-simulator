@@ -342,6 +342,126 @@ def test_noise_against_stim():
         assert abs(a - b) < 5 * sigma, (i, a, b)
 
 
+def test_pauli_channel_2_and_correlated_errors():
+    with pytest.raises(ValueError):
+        Circuit(2).pauli_channel_2(0, 1, [0.1] * 14)
+    with pytest.raises(ValueError):
+        Circuit(2).pauli_channel_2(0, 0, [0.01] * 15)
+    with pytest.raises(ValueError):
+        Circuit(2).pauli_channel_2(0, 1, [0.1] * 15)
+    p = [0.001 * (k + 1) for k in range(15)]
+    c = Circuit(2).pauli_channel_2(0, 1, p).measure_all()
+    assert c.instructions()[0] == ("pauli_channel_2", [0, 1], p)
+    assert c.to_stim().startswith("PAULI_CHANNEL_2(0.001, 0.002, ")
+    # A chain read from Stim is one channel, written back as the chain.
+    circuit, _, _ = from_stim("E(0.1) X0 Z2\nELSE_CORRELATED_ERROR(0.5) Y1\nM 0 1 2\n")
+    name, qubits, probabilities = circuit.instructions()[0]
+    assert (name, qubits) == ("correlated_error", [0, 2, 1])
+    assert probabilities == pytest.approx([0.1, 0.45])
+    assert circuit.to_stim().startswith("E(0.1) X0 Z2\nELSE_CORRELATED_ERROR(0.5) Y1\n")
+
+
+def test_mpp_and_correlated_errors_against_stim():
+    stim = pytest.importorskip("stim")
+    np = pytest.importorskip("numpy")
+    # A distance-3 toric code measured with MPP, with PAULI_CHANNEL_2
+    # and correlated errors: every detector fires at Stim's rate, and
+    # without noise none fires.
+    L = 3
+    h = lambda i, j: (i % L) * L + (j % L)
+    v = lambda i, j: L * L + (i % L) * L + (j % L)
+    stars = [[h(i, j), h(i, j - 1), v(i, j), v(i - 1, j)] for i in range(L) for j in range(L)]
+    plaqs = [[h(i, j), h(i + 1, j), v(i, j), v(i, j + 1)] for i in range(L) for j in range(L)]
+
+    def text(p):
+        k = len(plaqs) + len(stars)
+        lines = ["R " + " ".join(map(str, range(2 * L * L)))]
+        channel = ", ".join(str(p * (j + 1) / 120) for j in range(15))
+        for r in range(3):
+            lines.append(f"PAULI_CHANNEL_2({channel}) " + " ".join(map(str, range(2 * L * L))))
+            lines.append(f"E({p}) X0 X4\nELSE_CORRELATED_ERROR({p}) Z1 Y9")
+            lines.append(f"MPP({p}) " + " ".join("*".join(f"Z{q}" for q in s) for s in plaqs))
+            lines.append("MPP " + " ".join("*".join(f"X{q}" for q in s) for s in stars))
+            for a in range(len(plaqs)):
+                prev = f" rec[{a - 2 * k}]" if r else ""
+                lines.append(f"DETECTOR rec[{a - k}]{prev}")
+            if r:
+                for a in range(len(plaqs), k):
+                    lines.append(f"DETECTOR rec[{a - k}] rec[{a - 2 * k}]")
+        return "\n".join(lines) + "\n"
+
+    quiet, _ = sample_detectors(text(0.0), 2000, seed=1)
+    assert not quiet.any()
+    shots = 100_000
+    ours = sample_detectors(text(0.01), shots, seed=2)[0].mean(0)
+    theirs = stim.Circuit(text(0.01)).compile_detector_sampler(seed=2).sample(shots).mean(0)
+    sigma = np.sqrt(np.maximum((ours + theirs) / 2 * (1 - (ours + theirs) / 2), 1e-9) * 2 / shots)
+    assert (np.abs(ours - theirs) < 5 * sigma).all()
+
+
+def _affine_span(rows):
+    """The affine space of bit rows: (offset, pivot -> basis vector)."""
+    rows = [int("".join("1" if b else "0" for b in r), 2) for r in rows]
+    pivots = {}
+    for r in rows:
+        x = r ^ rows[0]
+        while x:
+            top = x.bit_length() - 1
+            if top not in pivots:
+                pivots[top] = x
+                break
+            x ^= pivots[top]
+    return rows[0], pivots
+
+
+def _reduce(x, pivots):
+    while x:
+        top = x.bit_length() - 1
+        if top not in pivots:
+            return x
+        x ^= pivots[top]
+    return 0
+
+
+def test_mpp_matches_stim_on_random_circuits():
+    stim = pytest.importorskip("stim")
+    np = pytest.importorskip("numpy")
+    # Noiseless stabilizer outcomes are uniform over an affine space of
+    # bit strings: random Clifford circuits with random Pauli products
+    # (inverted factors included) and Z measurements must span the same
+    # space in both simulators, with the same per-bit rates.
+    rng = random.Random(5)
+    one = ["H", "S", "S_DAG", "SQRT_X", "SQRT_Y", "H_YZ", "C_XYZ", "X"]
+    for trial in range(300):
+        n = rng.randint(2, 6)
+        lines = []
+        for _ in range(rng.randint(1, 4)):
+            for _ in range(rng.randint(1, 6)):
+                if rng.random() < 0.5:
+                    lines.append(f"{rng.choice(one)} {rng.randrange(n)}")
+                else:
+                    a, b = rng.sample(range(n), 2)
+                    lines.append(f"{rng.choice(['CX', 'CZ', 'CY', 'SWAP'])} {a} {b}")
+            products = []
+            for _ in range(rng.randint(1, 3)):
+                qubits = rng.sample(range(n), rng.randint(1, n))
+                factors = [("!" if rng.random() < 0.2 else "") + rng.choice("XYZ") + str(q) for q in qubits]
+                products.append("*".join(factors))
+            lines.append("MPP " + " ".join(products))
+            if rng.random() < 0.5:
+                lines.append("M " + " ".join(map(str, range(n))))
+        text = "\n".join(lines) + "\n"
+        shots = 4000
+        theirs = stim.Circuit(text).compile_sampler(seed=trial).sample(shots)
+        ours = sample(text, shots, seed=trial).T
+        offset_t, span_t = _affine_span(theirs)
+        offset_o, span_o = _affine_span(ours)
+        assert len(span_t) == len(span_o), text
+        assert all(_reduce(v, span_t) == 0 for v in span_o.values()), text
+        assert _reduce(offset_t ^ offset_o, span_t) == 0, text
+        assert np.abs(theirs.mean(axis=0) - ours.mean(axis=0)).max() < 0.05, text
+
+
 REPETITION = """\
 R 0 1 2 3 4
 REPEAT 4 {
@@ -380,7 +500,7 @@ def test_from_stim_and_detector_shapes():
     dets, obs = sample_detectors(quiet, 500, seed=2)
     assert not dets.any() and not obs.any()
     with pytest.raises(ValueError, match="not supported"):
-        sample_detectors("MPP X0*X1\n", 10)
+        sample_detectors("MXX 0 1\n", 10)
 
 
 def test_bit_packed_outputs_match_the_bool_outputs():

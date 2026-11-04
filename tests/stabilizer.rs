@@ -340,8 +340,9 @@ fn sampling_is_reproducible_across_thread_counts() {
     }
 }
 
-/// A random noise channel: one of the Pauli channels or `Depolarize2`,
-/// with probabilities up to 0.4 and sometimes exactly 0 or 1.
+/// A random noise channel: one of the Pauli channels, `Depolarize2`,
+/// `Pauli2` or a correlated error, with probabilities up to 0.4 and
+/// sometimes exactly 0 or 1.
 fn random_noise(rng: &mut impl Rng, n: usize) -> (Noise, Vec<usize>) {
     let mut p = || match rng.random_range(0..8) {
         0 => 0.0,
@@ -349,7 +350,7 @@ fn random_noise(rng: &mut impl Rng, n: usize) -> (Noise, Vec<usize>) {
         _ => rng.random::<f64>() * 0.4,
     };
     let (a, b, c) = (p(), p(), p());
-    let channel = match rng.random_range(0..6) {
+    let channel = match rng.random_range(0..8) {
         0 => Noise::Pauli1 {
             px: a,
             py: 0.0,
@@ -373,7 +374,30 @@ fn random_noise(rng: &mut impl Rng, n: usize) -> (Noise, Vec<usize>) {
                 pz: c / total,
             }
         }
-        _ if n >= 2 => Noise::Depolarize2(a),
+        4 | 5 if n >= 2 => Noise::Depolarize2(a),
+        6 if n >= 2 => {
+            let mut weights = [0.0; 15];
+            for w in weights.iter_mut() {
+                *w = rng.random::<f64>();
+            }
+            // Total probability a, spread unevenly over the 15 Paulis.
+            let sum: f64 = weights.iter().sum();
+            Noise::Pauli2(Box::new(weights.map(|w| w / sum * a)))
+        }
+        7 => {
+            // One to three products on up to three qubits, scaled so
+            // their probabilities sum to at most 1.
+            let k = rng.random_range(1..=n.min(3));
+            let mut products = Vec::new();
+            for _ in 0..rng.random_range(1..4) {
+                let mut paulis = String::new();
+                for _ in 0..k {
+                    paulis.push(['I', 'X', 'Y', 'Z'][rng.random_range(0..4)]);
+                }
+                products.push((rng.random::<f64>() * 0.3, paulis));
+            }
+            Noise::Correlated(products)
+        }
         _ => Noise::Pauli1 {
             px: 0.0,
             py: a,
@@ -524,10 +548,30 @@ fn rare_and_certain_errors_have_the_right_rates() {
             0.6 * 8.0 / 15.0,
             Some(0.6 * 4.0 / 15.0),
         ),
+        // PAULI_CHANNEL_2 with only XX (index 4) and ZY (index 13; Y flips
+        // the second qubit, Z does not flip the first): the first qubit
+        // flips at 0.002, the second at 0.003, both at 0.002.
+        (
+            Noise::Pauli2(Box::new({
+                let mut p = [0.0; 15];
+                p[4] = 0.002;
+                p[13] = 0.001;
+                p
+            })),
+            0.0025,
+            Some(0.002),
+        ),
+        // A correlated chain: X on the first qubit at 0.002, XX at 0.004;
+        // the first flips at 0.006, the second at 0.004.
+        (
+            Noise::Correlated(vec![(0.002, "XI".into()), (0.004, "XX".into())]),
+            0.005,
+            Some(0.004),
+        ),
     ] {
         let mut circuit = Circuit::new(n);
         let qubits: Vec<usize> = (0..n).collect();
-        circuit.noise(channel, &qubits);
+        circuit.noise(channel.clone(), &qubits);
         circuit.measure_all();
         let samples = stabilizer::sample(&circuit, shots, Some(5)).unwrap();
         let mut flips = 0usize;

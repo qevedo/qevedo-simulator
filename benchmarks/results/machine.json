@@ -58,5 +58,18 @@
       "numpy": "2.5.4",
       "stim": "1.16.0"
     }
+  },
+  "mpp_machine": {
+    "date": "2026-11-04",
+    "cpu": "Intel Xeon @ 2.10 GHz cloud virtual machine, 4 vCPUs (AVX2, FMA, AVX-512)",
+    "memory": "15 GB",
+    "os": "Linux 6.18",
+    "rustc": "1.97.0",
+    "python_packages": {
+      "numpy": "2.5.4",
+      "stim": "1.16.0",
+      "pymatching": "2.4.0"
+    },
+    "notes": "mpp*.csv and examples_before_after*.csv (qevedo-simulator 0.1.4 against the build released as 0.1.5)"
   }
 }

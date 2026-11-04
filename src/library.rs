@@ -285,7 +285,7 @@ pub fn with_depolarizing_noise(circuit: &Circuit, p: f64) -> Circuit {
                     _ => None,
                 })
                 .collect();
-            held.hold(flip, &run);
+            held.hold(flip.clone(), &run);
             held.flush(&mut noisy);
             noisy
                 .instructions
@@ -323,7 +323,7 @@ pub fn with_depolarizing_noise(circuit: &Circuit, p: f64) -> Circuit {
                     gate.arity()
                 )
             }
-            Instruction::Reset { qubit } => held.hold(flip, &[*qubit]),
+            Instruction::Reset { qubit } => held.hold(flip.clone(), &[*qubit]),
             _ => {}
         }
         i += 1;

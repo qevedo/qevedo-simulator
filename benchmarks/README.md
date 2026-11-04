@@ -15,6 +15,8 @@ benchmarks/
 │   ├── detectors*.csv          detection events of Stim's circuits: qvd vs Stim
 │   ├── output.csv              records and detection events into NumPy: qvd vs Stim
 │   ├── output_before_after.csv the same, two qvd builds interleaved (0.1.3 vs 0.1.4)
+│   ├── mpp*.csv                MPP toric-code memory with correlated errors: qvd vs Stim
+│   ├── examples_before_after*.csv the Rust examples, two builds interleaved (0.1.4 vs 0.1.5)
 │   ├── mps.csv                 matrix product states: qvd vs Qiskit Aer vs quimb
 │   ├── nearclifford.csv        Clifford+T circuits: qvd vs Qiskit Aer
 │   ├── pauliprop.csv           expectation values: qvd vs IBM's pauli-prop
@@ -26,6 +28,8 @@ benchmarks/
 ├── bench_detectors.py          Stim's circuits, detection events -> detectors*.csv
 ├── bench_output.py             sample / sample_detectors, bool and bit-packed -> output.csv
 ├── compare_builds.py           two builds interleaved -> output_before_after.csv
+├── bench_mpp.py                MPP, PAULI_CHANNEL_2 and correlated errors -> mpp*.csv
+├── compare_examples.py         the Rust examples of two builds interleaved -> examples_before_after.csv
 ├── compare_mps.py              times Qiskit Aer's and quimb's MPS simulators
 ├── compare_nearclifford.py     times Qiskit Aer's methods on Clifford+T circuits
 ├── compare_pauliprop.py        times IBM's pauli-prop on an expectation value
@@ -134,6 +138,35 @@ package (0.1.3 from before this output work, and 0.1.4) in turn, each case
 in a fresh process, best of 3 calls over 3 rounds, to show what the change
 did on the same machine at the same time.
 
+## Pauli product measurements and correlated errors
+
+`bench_mpp.py` writes a toric-code memory in Stim's format (`toric_mpp`
+in the script): L×L toric code, 2L² data qubits and no ancillas, every
+stabilizer measured directly with `MPP(p)` for L rounds. Before each
+round: `DEPOLARIZE1(p)` on every qubit, a biased `PAULI_CHANNEL_2` (ZZ at
+p/3, XX at p/6, the others at p/30) on the horizontal and vertical edge
+of every vertex, and L correlated chains `E(p) X X;
+ELSE_CORRELATED_ERROR(p) Z Z` on random pairs. `mpp.csv`: 10,000 shots of
+detection events, shot-major bool, best of 3; qvd on 4 threads and 1,
+Stim's detector sampler on one. `mpp_agreement.csv`: detection rates and
+logical error rates after PyMatching (from Stim's detector error model,
+`approximate_disjoint_errors=True` for the chains), 200,000 shots, plus
+the number of detection events in 10,000 noiseless shots.
+`mpp_long.csv` (`--long`): 4–12 million shots per simulator and case.
+Same 4-vCPU machine type as `detectors.csv`, measured on 2026-11-04 with
+stim 1.16.0 and pymatching 2.4.0.
+
+## Before and after a change (Rust examples)
+
+`compare_examples.py` runs the benchmark examples (`bench`, `shots`,
+`mps`, `nearclifford`, `pauliprop`, `stabilizer`, including its Stim
+`detectors` mode) from two directories of binaries in alternation, 9
+rounds, and records each build's best time and the median of the
+per-round ratios. `examples_before_after.csv` compares 0.1.4 with the
+build released as 0.1.5 on the 4-vCPU VM; `examples_before_after_recheck.csv`
+reruns, with 25 rounds, the cases whose ratio came out above 1.03 in
+that run.
+
 ## Matrix product states
 
 ![MPS benchmark](charts/mps.svg)
@@ -198,6 +231,10 @@ cargo build --release --example stabilizer
 # (pip install pymatching; the Python package built as above).
 .bench-venv/bin/python benchmarks/bench_detectors.py --distances 11,21,51
 .bench-venv/bin/python benchmarks/bench_detectors.py --long
+
+# MPP, PAULI_CHANNEL_2 and correlated errors: a toric-code memory against Stim.
+.bench-venv/bin/python benchmarks/bench_mpp.py
+.bench-venv/bin/python benchmarks/bench_mpp.py --long
 
 # Records and detection events into NumPy, bool and bit-packed, against Stim.
 .bench-venv/bin/python benchmarks/bench_output.py

@@ -109,6 +109,38 @@ fn noise_branches(channel: Noise, target: &[usize]) -> Vec<(f64, Vec<(Gate, usiz
                 (if k == 0 { 1.0 - p } else { p / 15.0 }, errors)
             })
             .collect(),
+        Noise::Pauli2(p) => {
+            // Stim's order: index k + 1 has the first qubit's letter in
+            // its high base-4 digit (I, X, Y, Z = 0..3).
+            let letters = [None, Some(Gate::X), Some(Gate::Y), Some(Gate::Z)];
+            let mut branches = vec![(1.0 - p.iter().sum::<f64>(), vec![])];
+            for (k, &q) in p.iter().enumerate() {
+                let errors = [((k + 1) / 4, target[0]), ((k + 1) % 4, target[1])]
+                    .into_iter()
+                    .filter_map(|(i, t)| letters[i].clone().map(|g| (g, t)))
+                    .collect();
+                branches.push((q, errors));
+            }
+            branches
+        }
+        Noise::Correlated(products) => {
+            let none = 1.0 - products.iter().map(|(p, _)| p).sum::<f64>();
+            let mut branches = vec![(none, vec![])];
+            for (p, paulis) in products {
+                let errors = target
+                    .iter()
+                    .zip(paulis.chars())
+                    .filter_map(|(&q, c)| match c {
+                        'X' => Some((Gate::X, q)),
+                        'Y' => Some((Gate::Y, q)),
+                        'Z' => Some((Gate::Z, q)),
+                        _ => None,
+                    })
+                    .collect();
+                branches.push((p, errors));
+            }
+            branches
+        }
     }
 }
 
@@ -133,7 +165,7 @@ pub fn exact_distribution(circuit: &Circuit) -> std::collections::BTreeMap<Strin
                 Instruction::Barrier { .. } => continue,
                 Instruction::Noise { channel, qubits } => {
                     // One target per instruction (split below).
-                    for (p, errors) in noise_branches(*channel, qubits) {
+                    for (p, errors) in noise_branches(channel.clone(), qubits) {
                         if p <= 0.0 {
                             continue;
                         }
@@ -181,7 +213,7 @@ pub fn exact_distribution(circuit: &Circuit) -> std::collections::BTreeMap<Strin
             Instruction::Noise { channel, qubits } => qubits
                 .chunks(channel.arity())
                 .map(|target| Instruction::Noise {
-                    channel: *channel,
+                    channel: channel.clone(),
                     qubits: target.to_vec(),
                 })
                 .collect(),
