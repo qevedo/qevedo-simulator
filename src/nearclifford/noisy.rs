@@ -166,13 +166,7 @@ impl Batch {
     /// Conjugate every shot's frame by the Cliffords prepended to `C` since
     /// the last call.
     fn sync(&mut self) {
-        let ops: Vec<Clifford> = self
-            .frame
-            .log
-            .as_mut()
-            .expect("logging")
-            .drain(..)
-            .collect();
+        let ops = std::mem::take(self.frame.log.as_mut().expect("logging"));
         if !ops.is_empty() {
             each_group(&mut self.groups, |_, group| {
                 for &op in &ops {

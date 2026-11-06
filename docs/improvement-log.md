@@ -3,7 +3,12 @@
 One entry per improvement run: what changed, why, what it measured, and
 what to try next. Newest first.
 
-## 2026-11-06 — Pauli noise on the near-Clifford backend (0.1.7)
+## 2026-11-06 — Pauli noise on the near-Clifford backend (0.1.8)
+
+0.1.7 was never published: CI's newer clippy (Rust 1.99, against 1.97
+here) rejected a `drain(..).collect()` in `noisy.rs`, so the Release
+workflow stopped before building wheels. The fix (`mem::take`) is the
+only code change in 0.1.8; it touches the noisy path only.
 
 **What.**
 - The near-Clifford backend samples every channel of `qvd::Noise`, so

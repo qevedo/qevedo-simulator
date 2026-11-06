@@ -165,7 +165,7 @@ stim 1.16.0 and pymatching 2.4.0.
 `detectors` mode) from two directories of binaries in alternation, 9
 rounds, and records each build's best time and the median of the
 per-round ratios. `examples_before_after.csv` compares 0.1.5 (the same Rust core as 0.1.6,
-which changed only the Python layer) with the build released as 0.1.7 on
+which changed only the Python layer) with the build released as 0.1.8 on
 the 4-vCPU VM; `examples_before_after_recheck.csv`
 reruns, with 25 rounds, the cases whose best-of or median ratio came out
 above 1.03 in that run. In the rerun every median ratio is at most 1.026

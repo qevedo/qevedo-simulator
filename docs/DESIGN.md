@@ -300,7 +300,7 @@ errors, exactly as in Stim. Three details make it cheap:
   changes, noiseless runs time the same as before (best of 5–9,
   interleaved, ratios 0.998–1.008).
 
-Noisy circuits run on the stabilizer backend and, since 0.1.7, on the
+Noisy circuits run on the stabilizer backend and, since 0.1.8, on the
 near-Clifford backend (section 9); the others return an error rather than
 ignore the channels. Against Stim (same file,
 4-vCPU VM, p = 0.001, 10,000 shots): 0.54 s against 1.54 s at d = 51 and

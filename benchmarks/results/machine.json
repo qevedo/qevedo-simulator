@@ -83,6 +83,6 @@
       "numpy": "2.5.4",
       "stim": "1.16.0"
     },
-    "notes": "noisy_nearclifford*.csv by benchmarks/bench_noisy_nearclifford.py (qevedo-simulator 0.1.7 against clifft 0.13.0); examples_before_after*.csv (qevedo-simulator 0.1.5, the same Rust core as 0.1.6, against the build released as 0.1.7) by benchmarks/compare_examples.py, 9 rounds and 25 for the recheck."
+    "notes": "noisy_nearclifford*.csv by benchmarks/bench_noisy_nearclifford.py (qevedo-simulator 0.1.8 against clifft 0.13.0); examples_before_after*.csv (qevedo-simulator 0.1.5, the same Rust core as 0.1.6, against the build released as 0.1.8) by benchmarks/compare_examples.py, 9 rounds and 25 for the recheck."
   }
 }
