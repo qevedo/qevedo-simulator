@@ -295,3 +295,212 @@ fn auto_prefers_near_clifford_when_much_cheaper() {
     .unwrap();
     assert_eq!(result.stats.peak_active_qubits, None);
 }
+
+/// A noisy non-Clifford circuit on `n` qubits: random gates (rotations by
+/// any angle, T, controlled phases, ...) with random noise channels between
+/// them, optionally a mid-circuit measurement and a reset, then every qubit
+/// measured.
+fn noisy_circuit(rng: &mut impl Rng, n: usize, case: u64, mid_circuit: bool) -> Circuit {
+    let mut circuit = Circuit::new(n);
+    for part in 0..3 {
+        let gates = random_gate_circuit(n, 8, case * 10 + part);
+        circuit.instructions.extend(gates.instructions);
+        let (channel, qubits) = common::random_noise(rng, n);
+        circuit.noise(channel, &qubits);
+    }
+    if mid_circuit {
+        circuit.measure(0, 0);
+        circuit.reset(n - 1);
+        circuit.x_error(n - 1, 0.25);
+        let more = random_gate_circuit(n, 8, case * 10 + 7);
+        circuit.instructions.extend(more.instructions);
+        let (channel, qubits) = common::random_noise(rng, n);
+        circuit.noise(channel, &qubits);
+    }
+    for q in 0..n {
+        circuit.measure(q, q + 1);
+    }
+    circuit
+}
+
+#[test]
+fn noisy_sampling_matches_exact_distribution() {
+    // Noise between non-Clifford gates, against the exact distribution
+    // summed over every combination of errors and every measurement
+    // outcome of a dense simulation. Errors before a rotation make some
+    // shots' frames anticommute with it, which splits the group of shots.
+    let mut rng = common::rng(41);
+    for case in 0..40u64 {
+        let n = 1 + (case as usize % 5);
+        let circuit = noisy_circuit(&mut rng, n, case, case % 2 == 1);
+        assert!(circuit.has_noise() && !qvd::stabilizer::is_clifford(&circuit));
+        let shots = 50_000;
+        let options = Options {
+            backend: Backend::NearClifford,
+            seed: Some(200 + case),
+            ..Options::default()
+        };
+        let result = qvd::run::<f64>(&circuit, shots, &options).unwrap();
+        assert_eq!(result.counts.values().sum::<usize>(), shots, "case {case}");
+        let exact = exact_distribution(&circuit);
+        let total: f64 = exact.values().sum();
+        assert!((total - 1.0).abs() < 1e-9, "case {case}: total {total}");
+        for key in result.counts.keys() {
+            assert!(
+                exact.get(key).is_some_and(|&p| p > 1e-12),
+                "case {case}: impossible outcome {key}"
+            );
+        }
+        for (key, &p) in &exact {
+            let observed = *result.counts.get(key).unwrap_or(&0) as f64 / shots as f64;
+            let sigma = (p * (1.0 - p) / shots as f64).sqrt();
+            let slack = 3.0 / shots as f64;
+            assert!(
+                (observed - p).abs() <= 5.0 * sigma + slack,
+                "case {case} {key}: observed {observed}, exact {p}"
+            );
+        }
+    }
+}
+
+#[test]
+fn noise_on_a_wide_circuit_flips_at_the_right_rates() {
+    // 150 qubits (frames of several words per qubit, many shots per word),
+    // one after the other: H, T, a noise channel, T†, H, measure. Without
+    // errors every qubit reads 0, with one active qubit at a time. A Z error
+    // between T and T† commutes with both and makes the qubit read 1. An X
+    // error anticommutes with them, so those shots split off and see T T =
+    // S instead of the identity, after which H S H|0> reads 1 with
+    // probability 1/2. Each qubit therefore reads 1 at rate pz + px / 2,
+    // independently.
+    let n = 150;
+    let shots = 20_000;
+    for (pz, px) in [(0.01, 0.0), (0.2, 0.0), (0.0, 0.1), (0.05, 0.3), (1.0, 0.0)] {
+        let mut circuit = Circuit::new(n);
+        for q in 0..n {
+            circuit.gate(Gate::H, &[q]).gate(Gate::T, &[q]);
+            circuit.noise(qvd::Noise::Pauli1 { px, py: 0.0, pz }, &[q]);
+            circuit.gate(Gate::Tdg, &[q]).gate(Gate::H, &[q]);
+            circuit.measure(q, q);
+        }
+        let options = Options {
+            backend: Backend::NearClifford,
+            seed: Some(5),
+            ..Options::default()
+        };
+        let result = qvd::run::<f64>(&circuit, shots, &options).unwrap();
+        assert_eq!(result.stats.peak_active_qubits, Some(1));
+        let expected = pz + px / 2.0;
+        let mut ones = vec![0usize; n];
+        for (key, &count) in &result.counts {
+            // Bit strings put classical bit 0 last.
+            for (q, c) in key.chars().rev().enumerate() {
+                if c == '1' {
+                    ones[q] += count;
+                }
+            }
+        }
+        let sigma = (expected * (1.0 - expected) / shots as f64).sqrt();
+        for (q, &k) in ones.iter().enumerate() {
+            let rate = k as f64 / shots as f64;
+            assert!(
+                (rate - expected).abs() <= 5.0 * sigma + 1e-12,
+                "pz {pz} px {px}, qubit {q}: rate {rate}, expected {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn noisy_sampling_is_reproducible_across_thread_counts() {
+    let mut rng = common::rng(43);
+    let circuit = noisy_circuit(&mut rng, 6, 3, true);
+    let options = Options {
+        backend: Backend::NearClifford,
+        seed: Some(4),
+        ..Options::default()
+    };
+    let sample = |threads| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| qvd::run::<f64>(&circuit, 5000, &options))
+            .unwrap()
+            .counts
+    };
+    assert_eq!(sample(1), sample(4));
+}
+
+#[test]
+fn auto_sends_noisy_non_clifford_circuits_to_near_clifford() {
+    let mut circuit = Circuit::new(3);
+    circuit.gate(Gate::H, &[0]).gate(Gate::T, &[0]).cx(0, 1);
+    circuit.depolarize1(1, 0.1);
+    circuit.measure_all();
+    let result = qvd::run::<f64>(&circuit, 100, &Options::default()).unwrap();
+    assert_eq!(result.stats.backend, Some(Backend::NearClifford));
+    // Noisy Clifford circuits still go to the stabilizer backend, and the
+    // state vector still refuses noise.
+    let mut clifford = Circuit::new(2);
+    clifford
+        .gate(Gate::H, &[0])
+        .cx(0, 1)
+        .depolarize1(0, 0.1)
+        .measure_all();
+    let result = qvd::run::<f64>(&clifford, 100, &Options::default()).unwrap();
+    assert_eq!(result.stats.backend, Some(Backend::Stabilizer));
+    let options = Options {
+        backend: Backend::StateVector,
+        ..Options::default()
+    };
+    assert!(qvd::run::<f64>(&circuit, 100, &options).is_err());
+}
+
+#[test]
+fn noisy_path_measures_and_resets_like_the_exact_distribution() {
+    // Small circuits with a mid-circuit measurement and a reset, run on the
+    // noisy path (a channel of probability 0 sends them there) without any
+    // error, against the exact distribution. Every kind of measurement
+    // occurs: of the dense part (splitting groups and retiring a qubit, with
+    // the X for outcome 1 put into the shots' frames), 50/50 ones that
+    // only change the frame, and fixed ones; each shot's outcome flips must
+    // be taken before a collapse conjugates the frames.
+    let shots = 4000;
+    for n in 2..=3usize {
+        for seed in 0..150u64 {
+            let mut circuit = random_gate_circuit(n, 5, seed);
+            circuit.x_error(0, 0.0);
+            circuit.measure(0, 0);
+            circuit.reset(n - 1);
+            let more = random_gate_circuit(n, 5, seed + 1000);
+            circuit.instructions.extend(more.instructions);
+            for q in 0..n {
+                circuit.measure(q, q + 1);
+            }
+            let options = Options {
+                backend: Backend::NearClifford,
+                seed: Some(seed),
+                ..Options::default()
+            };
+            let result = qvd::run::<f64>(&circuit, shots, &options).unwrap();
+            let exact = exact_distribution(&circuit);
+            for (key, &count) in &result.counts {
+                assert!(
+                    exact.get(key).is_some_and(|&p| p > 1e-12),
+                    "n {n} seed {seed}: impossible outcome {key} ({count} shots)"
+                );
+            }
+            for (key, &p) in &exact {
+                // Sums of branch weights can exceed 1 by a rounding error.
+                let p = p.clamp(0.0, 1.0);
+                let observed = *result.counts.get(key).unwrap_or(&0) as f64 / shots as f64;
+                let sigma = (p * (1.0 - p) / shots as f64).sqrt();
+                assert!(
+                    (observed - p).abs() <= 6.0 * sigma + 3.0 / shots as f64,
+                    "n {n} seed {seed} {key}: observed {observed}, exact {p}"
+                );
+            }
+        }
+    }
+}

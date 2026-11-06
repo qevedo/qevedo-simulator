@@ -222,7 +222,8 @@ pub enum Instruction {
     },
     /// A Pauli noise channel on `qubits` (for the two-qubit channels, on
     /// consecutive pairs; for [`Noise::Correlated`], on consecutive groups
-    /// as long as its products). Only the stabilizer backend runs noisy circuits.
+    /// as long as its products). The stabilizer and near-Clifford backends run
+    /// noisy circuits.
     Noise {
         channel: Noise,
         qubits: Vec<usize>,
@@ -231,8 +232,8 @@ pub enum Instruction {
 
 /// A Pauli noise channel: with some probability a random Pauli error,
 /// drawn independently in every shot. These are the channels of Stim's
-/// circuit-level noise models, and the stabilizer backend samples them
-/// exactly by adding the errors to each shot's Pauli frame.
+/// circuit-level noise models. The stabilizer and near-Clifford backends
+/// sample them exactly by adding the errors to each shot's Pauli frame.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Noise {
     /// On each qubit independently: X with probability `px`, Y with `py`,
@@ -309,6 +310,59 @@ impl Noise {
             Noise::Depolarize2(p) => ("DEPOLARIZE2", vec![p]),
             Noise::Pauli2(ref p) => ("PAULI_CHANNEL_2", p.to_vec()),
             Noise::Correlated(_) => ("CORRELATED_ERROR", self.probabilities()),
+        }
+    }
+
+    /// The error on one target given that the channel applies one, for a
+    /// draw `r` uniform in `[0, probability)` and `k` uniform in `1..16`
+    /// (used by `Depolarize2` only): one `(x, z)` pair per qubit of the
+    /// target, `(true, true)` for Y. This is the readable form of the
+    /// stabilizer sampler's inner loop, which inlines the common channels
+    /// for speed; the near-Clifford backend, which draws far fewer errors,
+    /// uses it as it is.
+    pub fn error(&self, r: f64, k: u32) -> Vec<(bool, bool)> {
+        // I, X, Y, Z coded 0..3, as in Stim's PAULI_CHANNEL_2 order.
+        let letter = |code: usize| (code == 1 || code == 2, code == 2 || code == 3);
+        // The first weight whose cumulative sum exceeds r; rounding can leave
+        // r just above the last sum, which then picks the last nonzero one.
+        let pick = |weights: &mut dyn Iterator<Item = f64>| {
+            let (mut acc, mut last) = (0.0, 0);
+            for (i, w) in weights.enumerate() {
+                acc += w;
+                if w > 0.0 {
+                    last = i;
+                }
+                if r < acc {
+                    return i;
+                }
+            }
+            last
+        };
+        match self {
+            &Noise::Pauli1 { px, py, .. } => {
+                let code = if r < px {
+                    1
+                } else if r < px + py {
+                    2
+                } else {
+                    3
+                };
+                vec![letter(code)]
+            }
+            // The bits of k are (x_a, z_a, x_b, z_b), as in the sampler.
+            Noise::Depolarize2(_) => vec![(k & 1 == 1, k & 2 == 2), (k & 4 == 4, k & 8 == 8)],
+            Noise::Pauli2(p) => {
+                let code = pick(&mut p.iter().copied()) + 1;
+                vec![letter(code / 4), letter(code % 4)]
+            }
+            Noise::Correlated(products) => {
+                let chosen = pick(&mut products.iter().map(|(p, _)| *p));
+                products[chosen]
+                    .1
+                    .bytes()
+                    .map(|c| (c == b'X' || c == b'Y', c == b'Z' || c == b'Y'))
+                    .collect()
+            }
         }
     }
 

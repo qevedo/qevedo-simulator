@@ -71,5 +71,18 @@
       "pymatching": "2.4.0"
     },
     "notes": "mpp*.csv and examples_before_after*.csv (qevedo-simulator 0.1.4 against the build released as 0.1.5)"
+  },
+  "noisy_nearclifford_machine": {
+    "date": "2026-11-05",
+    "cpu": "Intel Xeon @ 2.10 GHz cloud virtual machine, 4 vCPUs (AVX2, FMA, AVX-512)",
+    "memory": "15 GB",
+    "os": "Linux 6.18",
+    "rustc": "1.97.0",
+    "python_packages": {
+      "clifft": "0.13.0",
+      "numpy": "2.5.4",
+      "stim": "1.16.0"
+    },
+    "notes": "noisy_nearclifford*.csv by benchmarks/bench_noisy_nearclifford.py (qevedo-simulator 0.1.7 against clifft 0.13.0); examples_before_after*.csv (qevedo-simulator 0.1.5, the same Rust core as 0.1.6, against the build released as 0.1.7) by benchmarks/compare_examples.py, 9 rounds and 25 for the recheck."
   }
 }

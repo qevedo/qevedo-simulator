@@ -37,7 +37,8 @@ the same circuits. Circuits with few non-Clifford gates run on a
 near-Clifford backend (a Clifford frame around a small dense state, after
 Clifft): a 200-qubit Clifford+T circuit with 20 T gates samples 1000 shots in
 0.11 s, where every Qiskit Aer method either takes over 10 minutes or
-does not support it. Expectation values of circuits far beyond any state
+does not support it. It samples Pauli noise as well, exactly, though
+3.4–17.8× slower than Clifft on noisy circuits (details below). Expectation values of circuits far beyond any state
 vector come from Pauli propagation: `<Z62>` of IBM's 127-qubit, 20-step
 kicked Ising "utility" circuit in 0.25–9.6 s, with the same result as IBM's
 pauli-prop and 14.6–117× faster than it end to end (5.0–15.7× faster than
@@ -296,7 +297,7 @@ exactly over every error.
 What is not there yet: heralded errors, `MXX`/`MYY`/`MZZ` and `SPP`,
 classically controlled gates and sweep bits in the reader (each is an
 error naming the line, never skipped), writing detectors in `to_stim`,
-and noise on the other backends.
+and noise on the state-vector and MPS backends.
 
 ### Low-entanglement circuits (MPS)
 
@@ -367,6 +368,45 @@ of the frame computes that peak exactly before simulating, and `Backend::Auto`
 uses it to choose this backend when it beats the state vector by a wide
 margin. Final measurements are sampled with per-shot Pauli frames, so 1000
 shots cost little more than one.
+
+**Noise on Clifford+T circuits.** The near-Clifford backend samples Pauli
+noise too (all of Stim's channels that Qevedo takes), as Clifft does: each
+shot carries a Pauli frame, errors multiply into it, and shots share a
+dense state until an error makes a rotation act differently on them
+(details in [docs/DESIGN.md](docs/DESIGN.md#9-near-clifford-backend-nearclifford)).
+Noisy circuits that are not Clifford used to be refused by every backend;
+`Backend::Auto` now sends them here.
+
+Against Clifft 0.13 on random Clifford+T circuits (depth layers of random
+one-qubit Cliffords and CX on a random matching, T or T† on random qubits)
+with uniform depolarizing noise of strength p, the same circuit in both,
+10,000 shots, 4-vCPU Xeon VM (`benchmarks/bench_noisy_nearclifford.py`):
+
+| Circuit | p | Peak active qubits | Qevedo, 4 threads | Clifft, 4 threads | Qevedo, 1 thread | Clifft, 1 thread |
+|---|---|---|---|---|---|---|
+| 24 qubits, depth 20, 10 T | 0.001 | 10 | 0.043 s | **0.013 s** | 0.155 s | **0.035 s** |
+| 60 qubits, depth 20, 12 T | 0.001 | 12 | 0.275 s | **0.053 s** | 1.03 s | **0.140 s** |
+| 100 qubits, depth 30, 14 T | 0.001 | 14 | 1.98 s | **0.167 s** | 6.92 s | **0.390 s** |
+| 200 qubits, depth 40, 12 T | 0.001 | 12 | 1.25 s | **0.821 s** | 4.66 s | **0.912 s** |
+| 60 qubits, depth 20, 12 T | 0.01 | 12 | 0.627 s | **0.062 s** | 2.48 s | **0.166 s** |
+
+Clifft is faster on every case: by 3.4–17.8×, and at 200 qubits by 1.5× on
+4 threads and 5.1× on one. Without errors the two are close (the 100-qubit
+circuit: 0.33 s against Clifft's 0.23 s on one thread), but Qevedo's time grows
+with the number of shots that errors split off (6.73 s at p = 0.001)
+while Clifft's stays at 0.33–0.35 s: each split-off shot carries its own
+copy of the dense state and its own frame words through every operation,
+where Clifft runs one shot at a time through a precompiled program.
+Closing that gap is the next step.
+
+The results agree. 200,000 shots each: the whole distributions of three
+6- and 8-qubit circuits pass a chi-square test of homogeneity (p-values
+0.385, 0.893, 0.861), and on 24 and 60 qubits every qubit's rate of
+reading 1 agrees (largest |z| 1.79 and 3.33 over 24 and 60 qubits, mean z²
+0.84 and 0.93). The tests check sampled distributions against exact ones
+summed over every combination of errors. Noiseless circuits are not
+affected: their counts are identical to those of 0.1.5 and 0.1.6 for the
+same seed.
 
 ### Expectation values (Pauli propagation)
 
@@ -695,10 +735,10 @@ off). `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads.
    benchmarks on this machine is still to do.
 5. ~~OpenQASM input and Python bindings~~ (done: `qvd::qasm`, and the
    `qevedo-simulator` package in `python/`, imported as `qevedo.simulator`).
-6. ~~Noise~~ (done for the stabilizer backend: Stim's Pauli channels,
+6. ~~Noise~~ (done: Stim's Pauli channels on the stabilizer backend,
    sampled with geometric gaps between errors, and Stim's format with its
-   detector annotations); still to do on the near-Clifford backend's
-   frames.
+   detector annotations; and on the near-Clifford backend's per-shot
+   frames).
 7. ~~Qiskit integration~~ (done: `qevedo.simulator.qiskit` with a
    `BackendV2`, `SamplerV2` and `EstimatorV2`); Cirq and PennyLane are
    still to do.

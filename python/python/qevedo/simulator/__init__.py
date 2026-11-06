@@ -120,6 +120,11 @@ def run(
     right, as in Qiskit), ``backend`` (the method that ran), timings, and
     method-specific statistics: ``fidelity`` and ``max_bond_dimension`` for
     the MPS, ``peak_active_qubits`` for the near-Clifford backend.
+
+    Pauli noise channels (``x_error``, ``depolarize1``, ...) are sampled
+    independently in every shot by the stabilizer backend (Clifford
+    circuits) and the near-Clifford backend (others; ``"auto"`` picks it
+    for noisy non-Clifford circuits).
     """
     return _run(
         _circuit(circuit),

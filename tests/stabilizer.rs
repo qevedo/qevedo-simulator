@@ -340,74 +340,6 @@ fn sampling_is_reproducible_across_thread_counts() {
     }
 }
 
-/// A random noise channel: one of the Pauli channels, `Depolarize2`,
-/// `Pauli2` or a correlated error, with probabilities up to 0.4 and
-/// sometimes exactly 0 or 1.
-fn random_noise(rng: &mut impl Rng, n: usize) -> (Noise, Vec<usize>) {
-    let mut p = || match rng.random_range(0..8) {
-        0 => 0.0,
-        1 => 1.0,
-        _ => rng.random::<f64>() * 0.4,
-    };
-    let (a, b, c) = (p(), p(), p());
-    let channel = match rng.random_range(0..8) {
-        0 => Noise::Pauli1 {
-            px: a,
-            py: 0.0,
-            pz: 0.0,
-        },
-        1 => Noise::Pauli1 {
-            px: 0.0,
-            py: 0.0,
-            pz: a,
-        },
-        2 => Noise::Pauli1 {
-            px: a / 3.0,
-            py: a / 3.0,
-            pz: a / 3.0,
-        },
-        3 => {
-            let total = (a + b + c).max(1.0);
-            Noise::Pauli1 {
-                px: a / total,
-                py: b / total,
-                pz: c / total,
-            }
-        }
-        4 | 5 if n >= 2 => Noise::Depolarize2(a),
-        6 if n >= 2 => {
-            let mut weights = [0.0; 15];
-            for w in weights.iter_mut() {
-                *w = rng.random::<f64>();
-            }
-            // Total probability a, spread unevenly over the 15 Paulis.
-            let sum: f64 = weights.iter().sum();
-            Noise::Pauli2(Box::new(weights.map(|w| w / sum * a)))
-        }
-        7 => {
-            // One to three products on up to three qubits, scaled so
-            // their probabilities sum to at most 1.
-            let k = rng.random_range(1..=n.min(3));
-            let mut products = Vec::new();
-            for _ in 0..rng.random_range(1..4) {
-                let mut paulis = String::new();
-                for _ in 0..k {
-                    paulis.push(['I', 'X', 'Y', 'Z'][rng.random_range(0..4)]);
-                }
-                products.push((rng.random::<f64>() * 0.3, paulis));
-            }
-            Noise::Correlated(products)
-        }
-        _ => Noise::Pauli1 {
-            px: 0.0,
-            py: a,
-            pz: 0.0,
-        },
-    };
-    let qubits = common::random_qubits(rng, n, channel.arity());
-    (channel, qubits)
-}
-
 #[test]
 fn noisy_sampling_matches_exact_distribution() {
     // Random Clifford circuits with noise channels between the gates (and
@@ -422,7 +354,7 @@ fn noisy_sampling_matches_exact_distribution() {
             let part = random_clifford(&mut rng, n, 6);
             circuit.instructions.extend(part.instructions);
             // At most one two-qubit channel per gap keeps the exact sum small.
-            let (channel, qubits) = random_noise(&mut rng, n);
+            let (channel, qubits) = common::random_noise(&mut rng, n);
             circuit.noise(channel, &qubits);
             channels += 1;
         }
@@ -652,25 +584,39 @@ fn noisy_surface_code_detection_events() {
 }
 
 #[test]
-fn noise_needs_the_stabilizer_backend() {
+fn noise_needs_a_backend_with_pauli_frames() {
+    // Only the stabilizer and near-Clifford backends sample noise; the
+    // state vector and the MPS refuse it rather than ignore it.
     let mut circuit = Circuit::new(2);
     circuit.h(0).cx(0, 1).depolarize2(0, 1, 0.1).measure_all();
     assert!(stabilizer::is_clifford(&circuit));
     let auto = qvd::run::<f32>(&circuit, 100, &Options::default()).unwrap();
     assert_eq!(auto.stats.backend, Some(Backend::Stabilizer));
-    for backend in [Backend::StateVector, Backend::Mps, Backend::NearClifford] {
+    for (backend, runs) in [
+        (Backend::StateVector, false),
+        (Backend::Mps, false),
+        (Backend::NearClifford, true),
+    ] {
         let options = Options {
             backend,
             ..Options::default()
         };
-        assert!(
-            qvd::run::<f32>(&circuit, 10, &options).is_err(),
+        assert_eq!(
+            qvd::run::<f32>(&circuit, 10, &options).is_ok(),
+            runs,
             "{backend:?}"
         );
     }
-    // Not Clifford and noisy: no backend runs it.
+    // Not Clifford and noisy: the near-Clifford backend runs it, the
+    // stabilizer backend cannot.
     circuit.t(0);
-    assert!(qvd::run::<f32>(&circuit, 10, &Options::default()).is_err());
+    let auto = qvd::run::<f32>(&circuit, 10, &Options::default()).unwrap();
+    assert_eq!(auto.stats.backend, Some(Backend::NearClifford));
+    let options = Options {
+        backend: Backend::Stabilizer,
+        ..Options::default()
+    };
+    assert!(qvd::run::<f32>(&circuit, 10, &options).is_err());
     assert!(circuit.to_qasm().is_err());
     let mut rng = common::rng(1);
     assert!(Tableau::from_circuit(&circuit, &mut rng).is_err());

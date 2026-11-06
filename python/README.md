@@ -93,7 +93,7 @@ unconditional probability; `to_stim()` writes it back as the chain.
 | Backend | For | Scale on one workstation |
 |---|---|---|
 | `stabilizer` | Clifford circuits, with Pauli noise | tens of thousands of qubits |
-| `near_clifford` | Clifford circuits with few non-Clifford gates | hundreds of qubits, ~30 active |
+| `near_clifford` | Clifford circuits with few non-Clifford gates, with Pauli noise | hundreds of qubits, ~30 active |
 | `statevector` | anything that fits in memory (AVX2 kernels, gate fusion) | ~32 qubits |
 | `mps` | low-entanglement circuits | 100+ qubits, approximate beyond χ |
 

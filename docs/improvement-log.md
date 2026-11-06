@@ -3,6 +3,103 @@
 One entry per improvement run: what changed, why, what it measured, and
 what to try next. Newest first.
 
+## 2026-11-06 — Pauli noise on the near-Clifford backend (0.1.7)
+
+**What.**
+- The near-Clifford backend samples every channel of `qvd::Noise`, so
+  noisy circuits that are not Clifford run (before, every backend refused
+  them). `Backend::Auto` sends them there when at most 28 qubits are ever
+  active. New module `src/nearclifford/noisy.rs`.
+- Each shot is in the state `C P_s (φ_g ⊗ |0...0>)`, after Clifft (Chase &
+  Labib, arXiv:2604.27058): the Clifford frame `C` shared by a batch of
+  shots, the dense part `φ_g` by a group, a Pauli frame `P_s` per shot.
+  Errors multiply `C† E C` into `P_s` (geometric gaps between errors, as in
+  the stabilizer sampler). A rotation acts on `φ_g` as `exp(+iθ/2 P')` in
+  the shots whose frame anticommutes with `P'`, so a group splits there;
+  a dense measurement with both outcomes splits it too. The X that
+  retiring a qubit would prepend to `C` for outcome 1 goes into the shots'
+  frames instead, so all groups of a batch share `C` and advance in
+  lockstep: each Clifford, gathering and retirement is done once per batch.
+  Mid-circuit measurements and resets work on this path.
+- The noiseless final-measurement sampler now uses the same `Group` type
+  (frames, records, an alive mask, `split_off`). Its counts are identical
+  to 0.1.5's and 0.1.6's for the same seed (checked against the 0.1.5
+  wheel; 0.1.6 changed only the Python layer).
+  `retire_plan` and `virtual_pair` were pulled out of `NearClifford`.
+- `Noise::error` picks a channel's error for a draw (the readable form of
+  the stabilizer sampler's inlined loop).
+- Tests: noisy non-Clifford circuits with every channel, mid-circuit
+  measurement and reset, against the exact distribution summed over every
+  error; 300 small circuits on the noisy path with measurements and resets
+  against exact branching; a 150-qubit circuit with known flip rates;
+  reproducibility across thread counts; automatic selection. The test
+  helper `random_noise` moved to `tests/common`. Two tests that asserted
+  the old refusal (`noise_needs_the_stabilizer_backend`, and the Python
+  `test_noise_errors_and_stim_text`) now assert that the near-Clifford
+  backend runs noise and the state vector and MPS still refuse it.
+- `benchmarks/bench_noisy_nearclifford.py` against Clifft 0.13.
+
+**Why.** Every previous log named this first (noisy magic-state circuits:
+cultivation, distillation, injection, whose study is what Clifft, SOFT and
+Tsim were built for), and the simulator's frames were already per shot for the final
+measurements. It is exact and could be verified end to end today. The
+other candidates (`MXX`/`MYY`/`MZZ`, `SPP`, heralded errors; detectors
+without keeping every record) widen formats or save memory on what
+already runs; this runs a class of circuits nothing in the simulator could.
+
+**Measured** (4-vCPU Xeon VM, 2.1 GHz).
+- Against Clifft, 10,000 shots of random Clifford+T circuits with
+  depolarizing noise (`results/noisy_nearclifford.csv`): **Clifft is faster
+  on every case**, 3.4-17.8×; at 200 qubits 1.5× on 4 threads (Qevedo 1.25 s,
+  Clifft 0.82 s) and 5.1× on one. Without errors the two are close (100
+  qubits, 14 T: 0.33 s against 0.23 s); Qevedo's time grows with the shots
+  errors split off (6.73 s at p = 10⁻³), Clifft's does not (0.33-0.35 s)
+  (`results/noisy_nearclifford_sweep.csv`).
+- Agreement with Clifft, 200,000 shots: chi-square p-values 0.385, 0.893,
+  0.861 on the whole distributions of 6- and 8-qubit circuits; per-qubit
+  rates on 24 and 60 qubits, largest |z| 1.79 and 3.33, mean z² 0.84 and
+  0.93.
+- No regression: `compare_examples.py`, 0.1.5 (the Rust core of 0.1.6)
+  against this build, 9
+  rounds, then 25 for the six cases with a ratio above 1.03
+  (`results/examples_before_after*.csv`). Every median paired ratio in the
+  rerun is at most 1.026; best-of 1.032 (near-Clifford, 100 qubits) and
+  1.030 (stabilizer d = 51).
+
+**Learned.**
+- The first build of this made the noiseless 100-qubit near-Clifford
+  example 5-9% slower with identical counts and identical instruction
+  counts in every hot function (callgrind); built for AVX2 it was 5%
+  faster. Fat LTO with one codegen unit places code globally, and the new
+  noise code moved the dense kernels. Marking the noise path `#[cold]` and
+  `#[inline(never)]` brought it back, as `Frames::noise` is kept out of
+  line in the stabilizer sampler. Comparisons of this kind need paired,
+  randomly ordered runs: this VM drifted by ±10% between batches.
+- A first version gave every group its own copy of `C`. Sharing `C` made
+  the 200-qubit case 2.8× faster on 4 threads but the 60- and 100-qubit
+  ones 14-40% slower (every operation sweeps all groups' frames); summed,
+  15.2 s against 22.7 s on one thread. Neither is near Clifft once errors
+  split the shots: the cost is per split-off shot (a copy of `φ`, frame
+  words, a sweep per operation).
+- A bug in the first lockstep version (each shot's flips for a 50/50
+  measurement taken after the collapse had conjugated the frames) passed
+  33 of the 40 exact-distribution cases; the targeted test with 300 small
+  circuits catches it at once.
+
+**Next.**
+1. A per-shot path for the noisy near-Clifford backend once errors have
+   split a shot off: run such shots one at a time through the operations
+   precompiled once for the batch (the pulled-back Paulis, retire plans
+   and error images), with only `φ` and `P_s` per shot, as Clifft does.
+   Sampling the final measurements of each group in one pass over its `φ`
+   (diagonalize the commuting measured Paulis, then draw basis states)
+   would cut the per-shot dense work further.
+2. Read Stim's format (with `T`, `T_DAG` and the rotation gates Clifft
+   adds) and return detection events on the near-Clifford backend, so
+   magic-state cultivation circuits run directly.
+3. `MXX`/`MYY`/`MZZ`, `SPP` and heralded errors in the Stim reader, and
+   `to_stim` writing detectors and observables.
+
 ## 2026-11-06 — Qiskit backend and primitives (0.1.6)
 
 **What.** `python/python/qevedo/simulator/qiskit.py`, a new module:

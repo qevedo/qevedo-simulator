@@ -82,7 +82,7 @@ pub fn run(circuit: &Circuit, shots: usize, options: &Options) -> RunResult {
     };
     assert!(
         !circuit.has_noise(),
-        "noise channels run on the stabilizer backend only"
+        "noise channels run on the stabilizer and near-Clifford backends only"
     );
     let mut result = RunResult::default();
     result.stats.gates = circuit.gate_count();

@@ -317,8 +317,8 @@ impl PyCircuit {
         Ok(slf)
     }
 
-    /// Whether the circuit has noise channels (only the stabilizer backend
-    /// runs those).
+    /// Whether the circuit has noise channels (the stabilizer and
+    /// near-Clifford backends run those).
     fn has_noise(&self) -> bool {
         self.inner.has_noise()
     }

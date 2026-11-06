@@ -302,9 +302,11 @@ def test_noise_errors_and_stim_text():
     with pytest.raises(ValueError):
         Circuit(2).depolarize2(0, 0, 0.1)
     noisy = Circuit(2).h(0).cx(0, 1).depolarize2(0, 1, 0.01).z_error(1, 0.02).measure_all()
-    for backend in ("statevector", "mps", "near_clifford"):
+    # Only the stabilizer and near-Clifford backends sample noise.
+    for backend in ("statevector", "mps"):
         with pytest.raises(RuntimeError):
             run(noisy, 10, backend=backend)
+    assert sum(run(noisy, 10, backend="near_clifford").counts.values()) == 10
     with pytest.raises(ValueError):
         noisy.to_qasm()
     assert noisy.instructions()[2:4] == [
@@ -609,3 +611,27 @@ def test_stim_gates_against_stim_states():
         simulator.do(stim.Circuit(text))
         expected = simulator.state_vector(endian="little")
         assert abs(abs(np.vdot(expected, np.array(statevector(circuit)))) - 1) < 1e-5, text
+
+
+def test_noisy_non_clifford_circuits_run_on_near_clifford():
+    # H T X_ERROR(p) T† H on each qubit, measured before the next (so one
+    # qubit is active at a time): the identity without errors. An X error
+    # between T and T† leaves H S H|0> (up to the frame), which reads 1 half
+    # the time; a Z error added before the measurement never shows.
+    n, shots, p = 40, 20_000, 0.2
+    circuit = Circuit(n, n)
+    for q in range(n):
+        circuit.h(q).t(q).x_error(q, p).tdg(q).h(q).z_error(q, 0.3).measure(q, q)
+    assert circuit.has_noise() and choose_backend(circuit) == "near_clifford"
+    result = run(circuit, shots, seed=2)
+    assert result.backend == "near_clifford"
+    assert sum(result.counts.values()) == shots
+    ones = [0] * n
+    for key, count in result.counts.items():
+        for q, bit in enumerate(reversed(key)):
+            ones[q] += count * (bit == "1")
+    sigma = (p / 2 * (1 - p / 2) / shots) ** 0.5
+    for q in range(n):
+        assert abs(ones[q] / shots - p / 2) < 5 * sigma, (q, ones[q] / shots)
+    with pytest.raises(RuntimeError):
+        run(circuit, 10, backend="statevector")

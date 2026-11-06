@@ -234,3 +234,71 @@ pub fn exact_distribution(circuit: &Circuit) -> std::collections::BTreeMap<Strin
     );
     out
 }
+
+/// A random noise channel: one of the Pauli channels, `Depolarize2`,
+/// `Pauli2` or a correlated error, with probabilities up to 0.4 and
+/// sometimes exactly 0 or 1.
+pub fn random_noise(rng: &mut impl Rng, n: usize) -> (Noise, Vec<usize>) {
+    let mut p = || match rng.random_range(0..8) {
+        0 => 0.0,
+        1 => 1.0,
+        _ => rng.random::<f64>() * 0.4,
+    };
+    let (a, b, c) = (p(), p(), p());
+    let channel = match rng.random_range(0..8) {
+        0 => Noise::Pauli1 {
+            px: a,
+            py: 0.0,
+            pz: 0.0,
+        },
+        1 => Noise::Pauli1 {
+            px: 0.0,
+            py: 0.0,
+            pz: a,
+        },
+        2 => Noise::Pauli1 {
+            px: a / 3.0,
+            py: a / 3.0,
+            pz: a / 3.0,
+        },
+        3 => {
+            let total = (a + b + c).max(1.0);
+            Noise::Pauli1 {
+                px: a / total,
+                py: b / total,
+                pz: c / total,
+            }
+        }
+        4 | 5 if n >= 2 => Noise::Depolarize2(a),
+        6 if n >= 2 => {
+            let mut weights = [0.0; 15];
+            for w in weights.iter_mut() {
+                *w = rng.random::<f64>();
+            }
+            // Total probability a, spread unevenly over the 15 Paulis.
+            let sum: f64 = weights.iter().sum();
+            Noise::Pauli2(Box::new(weights.map(|w| w / sum * a)))
+        }
+        7 => {
+            // One to three products on up to three qubits, scaled so
+            // their probabilities sum to at most 1.
+            let k = rng.random_range(1..=n.min(3));
+            let mut products = Vec::new();
+            for _ in 0..rng.random_range(1..4) {
+                let mut paulis = String::new();
+                for _ in 0..k {
+                    paulis.push(['I', 'X', 'Y', 'Z'][rng.random_range(0..4)]);
+                }
+                products.push((rng.random::<f64>() * 0.3, paulis));
+            }
+            Noise::Correlated(products)
+        }
+        _ => Noise::Pauli1 {
+            px: 0.0,
+            py: a,
+            pz: 0.0,
+        },
+    };
+    let qubits = random_qubits(rng, n, channel.arity());
+    (channel, qubits)
+}

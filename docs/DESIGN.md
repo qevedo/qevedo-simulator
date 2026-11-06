@@ -300,8 +300,9 @@ errors, exactly as in Stim. Three details make it cheap:
   changes, noiseless runs time the same as before (best of 5–9,
   interleaved, ratios 0.998–1.008).
 
-Noisy circuits run on the stabilizer backend only; the other backends
-return an error rather than ignore the channels. Against Stim (same file,
+Noisy circuits run on the stabilizer backend and, since 0.1.7, on the
+near-Clifford backend (section 9); the others return an error rather than
+ignore the channels. Against Stim (same file,
 4-vCPU VM, p = 0.001, 10,000 shots): 0.54 s against 1.54 s at d = 51 and
 6.0 s against 37.5 s at d = 101 (0.90 s and 14.9 s on one thread). The
 detection rates agree within sampling error (`benchmarks/bench_noise.py`;
@@ -625,6 +626,64 @@ depends on measurement outcomes: `nearclifford::peak_active_qubits`.
 On 100 qubits with 23 active, 1000 shots took 214 s shot by shot, 38 s with
 the tree alone and 1.3 s with the frames.
 
+**Noise** (`nearclifford/noisy.rs`). Pauli channels (all of `Noise`) use
+per-shot Pauli frames from the first channel on, as Clifft's virtual Pauli
+frame does. Each shot is in the state `C P_s (φ_g ⊗ |0...0>)`: the frame `C`
+and the active qubits are shared by all shots of a batch, the dense part
+`φ_g` by the shots of a group `g`, and `P_s` is the shot's own.
+- An error `E` on physical qubits is the virtual Pauli `C† E C`; the shots
+  it hits multiply it into their frames. The gaps between errors are drawn
+  geometrically, as in the stabilizer sampler, and the images of `X_q` and
+  `Z_q` are pulled back only when an error on `q` occurs.
+- Clifford gates leave the frames alone (`G C P_s = (G C) P_s`); Cliffords
+  prepended to `C` (gathering, collapses, retiring) conjugate them.
+- A rotation `exp(-iθ/2 P')` passes through `P_s` as `exp(+iθ/2 P')` where
+  the two anticommute, so a group with shots of both kinds splits there.
+- A measurement draws each shot's outcome from its group's `φ_g` (flipped
+  where `P_s` anticommutes with the measured Pauli) or, for a 50/50
+  outcome that only changes the frame, puts it into `P_s` as `X_d`. A group
+  with both outcomes of a dense measurement splits. Retiring the measured
+  qubit would prepend an X to `C` for outcome 1 only; that X goes into the
+  shots' frames instead, so `C` stays shared. A reset measures into a
+  scratch column, then multiplies the frames of the shots that read 1 by
+  `C† X_q C`.
+
+All groups of a batch advance in lockstep, so each Clifford gate,
+gathering and retirement is done once per batch, and the dense work once
+per group. A split copies out the smaller side; the larger keeps its layout
+with the leavers cleared from a mask (compacted once a quarter of the slots
+are dead). Batches have at most 2^27 amplitudes' worth of shots (every shot
+could end in its own group), at least 64 and at most a sixteenth of the
+shots, and run in parallel with their own random streams, so the counts
+depend on the seed and not on the thread count. Noise does not change
+which qubits are active, so `peak_active_qubits` stays exact. Noiseless
+circuits do not take this path: their counts are the same as in 0.1.5 and
+0.1.6 for the same seed (checked against the 0.1.5 wheel; 0.1.6 changed
+only the Python layer).
+
+An earlier version (not released; timed with the same script on the same
+machine) split the shots the same way but gave every group its own copy
+of `C`, and ran each group as its own task. Noise
+splits most shots into groups of their own, so it repeated the Clifford
+work per shot. Sharing `C` made the 200-qubit case of the benchmark below
+2.8× faster on 4 threads (3.0× on one), but the 60- and 100-qubit cases
+14-40% slower, because every operation now sweeps the frames of all
+groups; summed over the five cases on one thread, 15.2 s against 22.7 s.
+
+**Against Clifft** (`benchmarks/bench_noisy_nearclifford.py`, 4-vCPU VM,
+10,000 shots; random Clifford+T circuits with uniform depolarizing noise,
+the same circuit in both). Clifft is faster on every case, by 3.4-17.8×
+and by 1.5× (4 threads) to 5.1× (1 thread) at 200 qubits. Both reach the
+same peak active width, and Qevedo is within 1.4× of Clifft when the same
+circuit has no errors (100 qubits, 14 T, on one thread: 0.33 s against
+0.23 s; `--sweep`, `results/noisy_nearclifford_sweep.csv`). With errors
+Qevedo's time grows with the number of groups (0.75 s at p = 10⁻⁵, 1.76 s at
+10⁻⁴, 6.73 s at 10⁻³) while Clifft's stays at 0.33-0.35 s, so the cost is
+what each split-off shot carries: a copy of `φ`, its own frame words, and
+a sweep over every group for each operation. Clifft runs one shot at a
+time through a precompiled program, with nothing per shot but `φ` and
+`P_s`.
+
 **Correctness** (`tests/nearclifford.rs`, plus unit tests of the dense
 kernels):
 - expectation values of random Pauli strings after random circuits over the
@@ -636,7 +695,15 @@ kernels):
 - a 200-qubit GHZ state with a T gate, checked against its analytic
   expectation values;
 - the dry-run peak against real runs, automatic selection, and
-  reproducibility across thread counts.
+  reproducibility across thread counts;
+- noisy circuits (every channel of `Noise`, between non-Clifford gates,
+  with mid-circuit measurement and reset) against the exact distribution
+  summed over every error, and 300 small circuits with mid-circuit
+  measurements and resets on the noisy path against exact branching;
+- a 150-qubit circuit whose errors split groups at known rates, and
+  agreement with Clifft (`results/noisy_nearclifford_agreement.csv`:
+  chi-square tests of the whole distribution of 6- and 8-qubit circuits,
+  per-qubit rates on 24 and 60 qubits, 200,000 shots each).
 
 **Against Qiskit Aer** (random Clifford+T circuits from
 `library::random_clifford_t`, 1000 shots, 8 threads;
@@ -785,9 +852,10 @@ remain (79 of its 87 s at 5 steps, θ_h = 1.2).
   that further when χ_max is far below the bond's rank. For 2D circuits,
   routing that also moves qubits apart again (or a 2D tensor network) would
   reduce the SWAPs.
-- **Noise beyond the stabilizer backend, and more of Stim's format.** The
-  near-Clifford backend's per-shot frames could take Pauli noise the same
-  way. The Stim reader lacks heralded errors, `MXX`/`MYY`/`MZZ` and
+- **Noise on more backends, and more of Stim's format.** The state
+  vector and MPS backends do not take noise (trajectories would). The
+  near-Clifford backend does not read Stim's format or return detection
+  events. The Stim reader lacks heralded errors, `MXX`/`MYY`/`MZZ` and
   `SPP`, classical control from measurement records and sweep bits, and
   `to_stim` does not write detectors. `sample_detectors` keeps
   every measurement record in memory (one bit per measurement and shot)

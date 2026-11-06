@@ -280,7 +280,8 @@ fn physical_memory() -> f64 {
 /// Run `circuit` for `shots` shots and count the classical outcomes.
 ///
 /// With [`Backend::Auto`], Clifford circuits go to the stabilizer backend
-/// (any number of qubits). Others go to the near-Clifford backend if at most
+/// (any number of qubits), and other circuits with noise channels to the
+/// near-Clifford backend (the only other one that samples noise). Others go to the near-Clifford backend if at most
 /// 28 qubits are ever active in it and either the state vector (precision
 /// `T`, at most 80% of physical memory) does not fit or its estimated dense
 /// work is four times the near-Clifford one; then to the state vector if it
@@ -308,6 +309,8 @@ pub fn choose_backend<T: Real>(circuit: &Circuit, options: &Options) -> Backend 
             let peak = crate::nearclifford::peak_active_qubits(circuit)
                 .filter(|&p| p <= MAX_ACTIVE_QUBITS);
             match peak {
+                // Only the stabilizer and near-Clifford backends sample noise.
+                Some(_) if circuit.has_noise() => Backend::NearClifford,
                 Some(peak) if !fits || near_clifford_is_cheaper(circuit, peak) => {
                     Backend::NearClifford
                 }
@@ -330,16 +333,16 @@ fn run_on<T: Real>(
             return crate::stabilizer::run(circuit, shots, options.seed)
                 .map_err(std::io::Error::other);
         }
-        _ if circuit.has_noise() => {
-            return Err(std::io::Error::other(format!(
-                "noise channels run on the stabilizer backend only (Clifford circuits), not {backend:?}"
-            )));
-        }
-        Backend::Mps => return Ok(crate::mps::run(circuit, shots, options)),
         Backend::NearClifford => {
             return crate::nearclifford::run(circuit, shots, options.seed)
                 .map_err(std::io::Error::other);
         }
+        _ if circuit.has_noise() => {
+            return Err(std::io::Error::other(format!(
+                "noise channels run on the stabilizer and near-Clifford backends only, not {backend:?}"
+            )));
+        }
+        Backend::Mps => return Ok(crate::mps::run(circuit, shots, options)),
         _ => {}
     }
     let mut rng = match options.seed {
