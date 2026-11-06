@@ -1,8 +1,9 @@
 """qvd: a fast quantum circuit simulator, as ``qevedo.simulator``.
 
 Build circuits with :class:`Circuit` (or read OpenQASM 2/3 with
-:meth:`Circuit.from_qasm`), then sample them with :func:`run` or get the
-final state with :func:`statevector`, draw raw measurement records of
+:meth:`Circuit.from_qasm`, or pass a Qiskit ``QuantumCircuit``; for a
+Qiskit backend and primitives see :mod:`qevedo.simulator.qiskit`), then
+sample them with :func:`run` or get the final state with :func:`statevector`, draw raw measurement records of
 noisy Clifford circuits with :func:`sample`, or compute expectation values of
 circuits far too large for a state vector with :func:`expectation`. ``run`` chooses the method
 automatically: the stabilizer backend for Clifford circuits, the
@@ -76,11 +77,19 @@ __all__ = [
 BACKENDS = ("auto", "statevector", "stabilizer", "mps", "near_clifford")
 
 
+def _is_qiskit(circuit) -> bool:
+    return type(circuit).__module__.split(".")[0] == "qiskit"
+
+
 def _circuit(circuit: Circuit | str) -> Circuit:
     if isinstance(circuit, str):
         return Circuit.from_qasm(circuit)
+    if _is_qiskit(circuit):
+        from qevedo.simulator.qiskit import from_qiskit
+
+        return from_qiskit(circuit)[0]
     if not isinstance(circuit, Circuit):
-        raise TypeError("expected a qevedo.simulator.Circuit or OpenQASM text")
+        raise TypeError("expected a qevedo.simulator.Circuit, a Qiskit QuantumCircuit or OpenQASM text")
     return circuit
 
 
@@ -95,7 +104,8 @@ def run(
     truncation_threshold: float = 1e-16,
     threads: int | str | None = None,
 ) -> RunResult:
-    """Sample ``shots`` shots of a circuit (or OpenQASM 2/3 text).
+    """Sample ``shots`` shots of a circuit (a qvd ``Circuit``, a Qiskit
+    ``QuantumCircuit``, or OpenQASM 2/3 text).
 
     ``backend`` is one of ``"auto"``, ``"statevector"``, ``"stabilizer"``,
     ``"mps"`` and ``"near_clifford"``. ``precision`` (``"single"`` or
@@ -127,7 +137,11 @@ def statevector(circuit: Circuit | str, *, threads: int | str | None = None):
     """The final state of a circuit without measurements, in double
     precision: a NumPy array of complex128 if NumPy is installed, a list of
     complex numbers otherwise. Index bit ``q`` is qubit ``q`` (Qiskit's
-    order)."""
+    order). A Qiskit circuit's global phase is kept."""
+    if _is_qiskit(circuit):
+        from qevedo.simulator.qiskit import _statevector
+
+        return _statevector(circuit, threads)
     raw = _statevector_bytes(_circuit(circuit), threads=threads)
     try:
         import numpy as np
@@ -310,6 +324,10 @@ def expectation(
     the largest are kept. The result's ``truncated_one_norm``, the sum of
     the dropped magnitudes, bounds the error of ``value``.
     """
+    if _is_qiskit(circuit):
+        from qevedo.simulator.qiskit import _convert
+
+        circuit = _convert(circuit, propagation=True)[0]
     return _expectation(
         _circuit(circuit),
         _terms(observable),

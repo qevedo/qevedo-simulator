@@ -109,4 +109,44 @@ at the thresholds in the main README's benchmark.
 x86-64 wheels are built for AVX2 + FMA processors (2013–2015 or newer);
 other x86-64 machines can build from source with a Rust toolchain.
 
+## From Qiskit
+
+`pip install qevedo-simulator[qiskit]` (Qiskit 2.x). `qevedo.simulator.qiskit`
+has a backend and the V2 primitives:
+
+```python
+from qiskit import QuantumCircuit, transpile
+from qevedo.simulator.qiskit import QevedoEstimator, QevedoSampler, QevedoSimulator
+
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+
+backend = QevedoSimulator()              # BackendV2: any standard gate, no coupling map
+measured = qc.measure_all(inplace=False)
+counts = backend.run(transpile(measured, backend), shots=1000).result().get_counts()
+
+bits = QevedoSampler(seed=1).run([measured], shots=1000).result()[0].data.meas    # BitArray
+evs = QevedoEstimator().run([(qc, ["ZZ", "XX"])]).result()[0].data.evs            # [1. 1.]
+```
+
+- `QevedoSimulator` runs circuits with `run`, so it picks the method the same
+  way and reports it in `result.results[i].metadata["method"]`. Options:
+  `shots`, `seed_simulator`, `method` (qvd's or Aer's names), `precision`,
+  `max_bond_dimension`, `truncation_threshold`, `threads`, `memory`.
+  Qiskit's `BackendSamplerV2` and `BackendEstimatorV2` work on it too.
+- `QevedoSampler` returns one `BitArray` per classical register. Measurements
+  may be anywhere in the circuit, and resets are allowed.
+- `QevedoEstimator` evaluates every observable exactly on the state vector up
+  to `statevector_max_qubits` (24) qubits, and by Pauli propagation beyond
+  that, up to 1024 qubits. Propagation drops small Pauli coefficients
+  (`min_abs_coefficient`), and `data.truncated_one_norm` bounds the error.
+- Every standard Qiskit gate runs. Gates without a kernel of their own (`ecr`,
+  `iswap`, `ryy`, ...) run as their exact matrices, and others (QFT, MCX,
+  `UnitaryGate`, `PauliEvolutionGate`, ...) through their definitions.
+  Control flow and unbound parameters are rejected. Aer noise models are not
+  read.
+- `run`, `statevector` and `expectation` also take a `QuantumCircuit`
+  directly. `statevector` keeps its global phase.
+
 License: MIT.

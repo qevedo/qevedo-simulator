@@ -9,7 +9,7 @@ description = "qvd, a fast quantum circuit simulator: AVX2 state vector, stabili
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-keywords = ["quantum", "simulator", "quantum-computing", "statevector", "stabilizer"]
+keywords = ["quantum", "simulator", "quantum-computing", "statevector", "stabilizer", "qiskit"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
@@ -18,7 +18,8 @@ classifiers = [
 
 [project.optional-dependencies]
 numpy = ["numpy>=1.24"]
-test = ["pytest>=7", "numpy>=1.24"]
+qiskit = ["qiskit>=2.0", "numpy>=1.24"]
+test = ["pytest>=7", "numpy>=1.24", "qiskit>=2.0"]
 
 [project.urls]
 Homepage = "https://github.com/qevedo/qevedo-simulator"

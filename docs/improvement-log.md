@@ -3,6 +3,59 @@
 One entry per improvement run: what changed, why, what it measured, and
 what to try next. Newest first.
 
+## 2026-11-06 — Qiskit backend and primitives (0.1.6)
+
+**What.** `python/python/qevedo/simulator/qiskit.py`, a new module:
+- `from_qiskit(QuantumCircuit)`: every standard Qiskit gate. The 37 that the
+  simulator knows by name are read directly, the others (`ecr`, `iswap`, `ryy`,
+  `rzx`, `xx_plus_yy`, ...) as their exact matrices (up to 4 qubits), and
+  anything else (QFT, MCX, `UnitaryGate`, `PauliEvolutionGate`, custom
+  gates) through its definitions. `box` is inlined. Control flow and
+  unbound parameters are rejected. The global phase is tracked so state
+  vectors equal Qiskit's exactly.
+- `QevedoSimulator` (`BackendV2`): a target of all standard gates with no
+  coupling map (1024 qubits by default), Aer-like options (`method` takes
+  Aer's names too), `memory`, register-formatted counts, and the method
+  that ran in each result's metadata. Qiskit's `BackendSamplerV2` and
+  `BackendEstimatorV2` work on it.
+- `QevedoSampler` (`SamplerV2`): one `BitArray` per register, with
+  mid-circuit measurements and resets (Qiskit's reference sampler rejects
+  both). The simulator returns counts, so the shots are put in a seeded random order:
+  for independent shots this has the same distribution as the order they
+  were drawn in.
+- `QevedoEstimator` (`EstimatorV2`): exact on the state vector up to 24
+  qubits (one simulation per parameter set for all observables), Pauli
+  propagation beyond that, with the dropped one-norm in
+  `data.truncated_one_norm`. Gates the simulator stores as multi-qubit matrices
+  go through their definitions for propagation.
+- `run`, `statevector` and `expectation` accept a `QuantumCircuit`.
+- New `[qiskit]` extra; Qiskit added to `[test]` so CI runs
+  `tests/test_qiskit.py`.
+
+**Why.** Roadmap item 5 in the workspace plan (the simulator as a Qiskit backend),
+which is the way most users would try a simulator.
+
+**Measured** (i9-14900K, 32 threads, shared with other jobs;
+`benchmarks/bench_qiskit.py`, best of 3, through Qiskit's interfaces on
+both sides). With `backend.run`, 1000 shots: Quantum Volume 20 / 24 / 26 /
+28 took 0.041 / 0.264 / 1.23 / 5.91 s against Aer's 1.31 / 3.36 / 10.4 /
+39.0 s (32x / 13x / 8.5x / 6.6x). QFT 24 / 28 was 20x / 8.0x faster.
+Converting the circuit takes 3–12 ms. A 500-qubit Clifford circuit with 10k
+shots took 0.023 s against 80 s for Aer's stabilizer method, which
+simulates every shot again. With the estimator on QV 16 / 20 / 22 and 50
+Pauli observables: 30x / 16x / 5.5x faster than Aer's `EstimatorV2`, with
+values within 6e-17. Tests: every standard gate against `Statevector`
+(phase included) on both the state-vector and propagation paths, plus
+composite gates, distributions, registers, memory, seeds and broadcasting.
+They pass on Qiskit 2.5.2 and 2.0.3.
+
+**Next.**
+1. Aer noise models (at least Pauli errors on Clifford circuits, into
+   the simulator's channels).
+2. Classical control flow (`if_test`) on the backends that already
+   measure mid-circuit.
+3. Cirq and PennyLane devices.
+
 ## 2026-11-04 — Pauli product measurements, PAULI_CHANNEL_2 and correlated errors (0.1.5)
 
 **What.**
@@ -194,6 +247,7 @@ far wider than any difference. The Stim-format `detectors` mode came out
    detectors and observables.
 3. Detection events without keeping every measurement record (memory at
    d = 101 is dominated by the 1.3 GB record, as large as the output).
+
 
 ## 2026-10-31 — Stim's circuit format and detection events (0.1.3)
 

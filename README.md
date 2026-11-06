@@ -490,6 +490,28 @@ packed, _ = sample_detectors(circuit, 100_000, seed=1, bit_packed=True)  # (1000
 See [python/README.md](python/README.md). The bindings are a PyO3 module
 built with maturin; simulations release the GIL.
 
+### From Qiskit
+
+```bash
+pip install "qevedo-simulator[qiskit]"   # Qiskit 2.x
+```
+
+```python
+from qiskit import transpile
+from qevedo.simulator.qiskit import QevedoEstimator, QevedoSampler, QevedoSimulator
+
+backend = QevedoSimulator()                              # BackendV2, no coupling map
+counts = backend.run(transpile(qc, backend), shots=1000).result().get_counts()
+bits = QevedoSampler().run([qc], shots=1000).result()[0].data.meas         # SamplerV2
+evs = QevedoEstimator().run([(qc_unmeasured, ["ZZ", "XX"])]).result()[0].data.evs  # EstimatorV2
+```
+
+The backend and sampler choose the method as `run` does, and they keep
+mid-circuit measurements and resets. The estimator is exact on the state
+vector up to 24 qubits and uses Pauli propagation beyond that. Every
+standard Qiskit gate runs, and `run`, `statevector` and `expectation` also
+accept a `QuantumCircuit`. See [python/README.md](python/README.md#from-qiskit).
+
 ### From Rust
 
 ```rust
@@ -677,6 +699,9 @@ off). `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads.
    sampled with geometric gaps between errors, and Stim's format with its
    detector annotations); still to do on the near-Clifford backend's
    frames.
+7. ~~Qiskit integration~~ (done: `qevedo.simulator.qiskit` with a
+   `BackendV2`, `SamplerV2` and `EstimatorV2`); Cirq and PennyLane are
+   still to do.
 
 ## License
 
