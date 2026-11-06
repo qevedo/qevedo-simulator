@@ -12,7 +12,7 @@ name: Release
 # repository "qevedo-simulator", workflow "release.yml", environment "pypi".
 #
 # x86-64 wheels target x86-64-v3 (AVX2 + FMA, 2013-2015 processors and newer)
-# for qvd's AVX2 kernels; the repository's own `-C target-cpu=native` must not
+# for the simulator's AVX2 kernels; the repository's own `-C target-cpu=native` must not
 # leak into wheels, so every build sets RUSTFLAGS.
 on:
   push:

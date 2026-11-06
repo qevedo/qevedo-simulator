@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "qevedo-simulator"
 dynamic = ["version"]
-description = "qvd, a fast quantum circuit simulator: AVX2 state vector, stabilizer, MPS and near-Clifford backends (qevedo.simulator)"
+description = "The Qevedo simulator, a fast quantum circuit simulator: AVX2 state vector, stabilizer, MPS and near-Clifford backends (qevedo.simulator)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"

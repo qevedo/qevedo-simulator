@@ -248,26 +248,26 @@ The steps, in order:
 
 **Against Stim and Qiskit Aer.** Same OpenQASM circuits (layered
 generator), 10,000 shots, timed by `benchmarks/compare_stim.py`. Stim 1.16
-is single-threaded; qvd is shown on 8 P-cores and on one thread. Stim is
+is single-threaded; Qevedo is shown on 8 P-cores and on one thread. Stim is
 timed two ways: `reference_sample()` plus a `FlipSimulator` with
 measurement-major output (the fair comparison), and
 `compile_sampler().sample(bit_packed=True)`.
 
-| Distance | Qubits | Gates | Measurements | qvd, 8 P-cores (1 thread) | Stim 1.16, reference + `FlipSimulator` | Stim `sample()` | Qiskit Aer 0.17 stabilizer |
+| Distance | Qubits | Gates | Measurements | Qevedo, 8 P-cores (1 thread) | Stim 1.16, reference + `FlipSimulator` | Stim `sample()` | Qiskit Aer 0.17 stabilizer |
 |---|---|---|---|---|---|---|---|
 | 11 | 241 | 6,160 | 1,441 | **0.001 s** (0.003 s) | 0.004 s | 0.11 s | 10.8 s |
 | 21 | 881 | 44,520 | 9,681 | **0.010 s** (0.018 s) | 0.036 s | 0.32 s | 636 s |
 | 51 | 5,201 | 652,800 | 135,201 | **0.14 s** (0.29 s) | 0.45 s | 6.9 s | — |
 | 101 | 20,401 | 5,110,600 | 1,040,401 | **1.5 s** (4.4 s) | 12.4 s | 131 s | — |
 
-These runs shared the machine with a virtual machine. Stim, Aer and qvd on
-one thread ran while it used about six cores; qvd on 8 P-cores was
+These runs shared the machine with a virtual machine. Stim, Aer and Qevedo on
+one thread ran while it used about six cores; Qevedo on 8 P-cores was
 re-measured after the parallel reference shot while it used about 14, which
-can only have slowed qvd down. (One thread takes the same sequential path as
+can only have slowed Qevedo down. (One thread takes the same sequential path as
 before.) At d = 51 Stim spends 0.17 s on its reference shot and the rest in
 frames; at d = 101 its reference shot alone takes 8.0 s, against 0.75 s
-for qvd's. `sample()`, which returns shot-major bits, is 9–27× slower than
-Stim's flip simulator here. Single-threaded, qvd is 1.3–2.8× faster than
+for Qevedo's. `sample()`, which returns shot-major bits, is 9–27× slower than
+Stim's flip simulator here. Single-threaded, Qevedo is 1.3–2.8× faster than
 Stim; with 8 P-cores it is 3–8× faster.
 
 **Noise.** A Pauli noise channel (`Noise::Pauli1 { px, py, pz }` per
@@ -544,7 +544,7 @@ gates before the first one once, then each shot continues from a copy.
 **Against Qiskit Aer and quimb** (same QASM, same truncation, 1000 shots, 8
 threads; `benchmarks/compare_mps.py`):
 
-| Circuit | χ cap | qvd | Qiskit Aer 0.17 MPS | quimb 1.15 `CircuitPermMPS` |
+| Circuit | χ cap | Qevedo | Qiskit Aer 0.17 MPS | quimb 1.15 `CircuitPermMPS` |
 |---|---|---|---|---|
 | Random 1D, 64 qubits, depth 10 | 256 | **0.018 s** | 0.25 s | 10.3 s (0.23 s gates) |
 | Random 1D, 64 qubits, depth 20 | 256 | **8.5 s** | 114 s | 31.9 s (14.4 s gates) |
@@ -553,11 +553,11 @@ threads; `benchmarks/compare_mps.py`):
 | QFT, 100 qubits | 256 | **0.040 s** | 0.11 s | 21.7 s (3.1 s gates) |
 | Random 1D, 64 qubits, depth 12, labels scrambled | 64 | **0.049 s** | 21.3 s | 26.6 s (10.5 s gates) |
 
-qvd's gates are 2–2.6× faster than quimb's on the 1D circuits and about
+Qevedo's gates are 2–2.6× faster than quimb's on the 1D circuits and about
 equal on the grid. Aer is 1.6–14× slower in total, and quimb's total is
 dominated by sampling shot by shot in Python. On scrambled labels the
-qubit order makes the difference: exact at χ = 64 for qvd, 2×10⁻¹³ fidelity
-for quimb. qvd's column was measured last, under heavier load than the
+qubit order makes the difference: exact at χ = 64 for Qevedo, 2×10⁻¹³ fidelity
+for quimb. Qevedo's column was measured last, under heavier load than the
 others. The research target, a 64-qubit depth-10 random circuit within
 quimb's ~10 s, is met by a wide margin for the 1D circuit. The 2D grid is
 the harder case, where the SWAP routing multiplies the SVDs.
@@ -642,7 +642,7 @@ kernels):
 `library::random_clifford_t`, 1000 shots, 8 threads;
 `benchmarks/compare_nearclifford.py`):
 
-| Circuit | Peak active qubits | qvd near-Clifford | qvd state vector | Qiskit Aer state vector | Aer extended stabilizer (approximate) | Aer MPS |
+| Circuit | Peak active qubits | Qevedo near-Clifford | Qevedo state vector | Qiskit Aer state vector | Aer extended stabilizer (approximate) | Aer MPS |
 |---|---|---|---|---|---|---|
 | 24 qubits, depth 20, 10 T | 10 | **0.003 s** | 0.55 s | 2.9 s | 508 s | > 600 s |
 | 30 qubits, depth 20, 12 T | 12 | **0.003 s** | 51 s | 210 s | > 600 s | > 600 s |
@@ -650,7 +650,7 @@ kernels):
 | 100 qubits, depth 30, 24 T | 23 | **0.85 s** | — | — | over its 63-qubit limit | > 600 s |
 | 200 qubits, depth 40, 20 T | 20 | **0.11 s** | — | — | over its 63-qubit limit | > 600 s |
 
-Runs were stopped at 600 s. The state vector is double precision (qvd's
+Runs were stopped at 600 s. The state vector is double precision (Qevedo's
 30-qubit run spends most of its time on the CX gates between random qubit
 pairs, which fuse poorly). The CX layers make these circuits highly
 entangled, which is why the MPS methods cannot follow. The dense work is exponential in the peak
@@ -742,7 +742,7 @@ circuit, with the same threshold in both, on a 4-vCPU Xeon virtual
 machine (not the i9). Both return the same value, the same number of
 strings and the same dropped one-norm in every case.
 
-| Steps | θ_h | Threshold | Strings | qvd, 4 threads | qvd, 1 thread | pauli-prop, total | pauli-prop, propagation only |
+| Steps | θ_h | Threshold | Strings | Qevedo, 4 threads | Qevedo, 1 thread | pauli-prop, total | pauli-prop, propagation only |
 |---|---|---|---|---|---|---|---|
 | 20 | 0.2 | 10⁻⁵ | 25,041 | **0.25 s** | 0.25 s | 5.7 s | 1.2 s |
 | 20 | 0.4 | 10⁻⁵ | 1,162,230 | **9.6 s** | 27.4 s | 191 s | 152 s |
@@ -750,7 +750,7 @@ strings and the same dropped one-norm in every case.
 | 5 | 1.2 | 10⁻⁶ | 2,047,259 | **0.74 s** | 2.3 s | 87 s | 7.6 s |
 | 5 | 1.4 | 10⁻⁶ | 469,018 | **0.23 s** | 0.65 s | 13.3 s | 1.6 s |
 
-On one thread qvd's whole run is 2.4–5.5× faster than pauli-prop's Rust
+On one thread Qevedo's whole run is 2.4–5.5× faster than pauli-prop's Rust
 propagation alone; with four threads and end to end, 14.6–117×. pauli-prop's
 total adds its Clifford preprocessing and evolving the final strings
 through that Clifford in Qiskit, which dominates when millions of strings

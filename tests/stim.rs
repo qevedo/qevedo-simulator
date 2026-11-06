@@ -337,7 +337,7 @@ fn detector_sampling_is_reproducible_across_thread_counts() {
 
 #[test]
 fn round_trip_through_to_stim() {
-    // qvd's own export reads back as the same samples.
+    // Qevedo's own export reads back as the same samples.
     let circuit = qvd::library::with_depolarizing_noise(&qvd::library::surface_code(3, 3), 0.01);
     let text = stabilizer::to_stim(&circuit).unwrap();
     let parsed = parse(&text).unwrap();

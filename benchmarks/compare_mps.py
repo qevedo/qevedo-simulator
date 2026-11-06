@@ -4,10 +4,10 @@ Qiskit Aer's `matrix_product_state` method and quimb's `CircuitPermMPS`.
     python benchmarks/compare_mps.py circuit.qasm [--max-bond 256] [--shots 1000]
         [--threshold 1e-16] [--threads 8] [--skip aer,quimb]
 
-Both use qvd's truncation: at most `max_bond` singular values per bond, and
+Both use Qevedo's truncation: at most `max_bond` singular values per bond, and
 the smallest ones are dropped while the sum of their squares stays below
 `threshold` (quimb's `cutoff_mode="rsum2"`). quimb's `CircuitPermMPS`, like
-qvd, leaves qubits where SWAPs moved them.
+Qevedo, leaves qubits where SWAPs moved them.
 """
 
 import argparse

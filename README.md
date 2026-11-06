@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/qevedo/qevedo-simulator/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/qevedo/qevedo-simulator/actions/workflows/ci.yml)
 
-`qvd`, the simulator in this repository, is a Rust crate and the Python
-package `qevedo-simulator` (imported as `qevedo.simulator`).
+The Qevedo simulator is a Rust crate (`qvd`) and the Python package
+`qevedo-simulator` (imported as `qevedo.simulator`).
 
 A quantum circuit simulator in Rust, built around one fact: on a modern CPU,
 simulating a large circuit is limited by **memory bandwidth**, not by
@@ -18,7 +18,7 @@ Clifford circuits go to a stabilizer backend instead, which has no 2ⁿ
 memory wall: a distance-101 surface code (20,401 qubits, 5.1M gates, 1M
 measurements) samples 10,000 shots in 1.5 s, 8× faster than Stim and
 2.8× faster on a single thread (details below, including a caveat on how
-Stim was timed; re-timed fairly on a 4-vCPU machine, qvd is 6.5× and 3.0×
+Stim was timed; re-timed fairly on a 4-vCPU machine, Qevedo is 6.5× and 3.0×
 faster at this size, and within 1.3× of Stim at d = 11 and 21). It also samples Pauli
 noise (Stim's channels, independently in every shot), which error-correction
 studies need: the same distance-101 code with circuit-level depolarizing
@@ -67,14 +67,14 @@ The recorded data (CSV), the scripts that produced it and the charts are in
 
 ### State-vector simulation
 
-![State-vector benchmark: qvd vs qsim vs Qiskit Aer](benchmarks/charts/statevector.svg)
+![State-vector benchmark: Qevedo vs qsim vs Qiskit Aer](benchmarks/charts/statevector.svg)
 
 Same OpenQASM circuits, same machine, best of 16 or 32 threads for each
 simulator. Random circuits are depth-20 Google-style circuits (√X, √Y, √W
 on every qubit and CZ on a brick pattern); QFT is the quantum Fourier
 transform.
 
-| Circuit | Qubits | Precision | qvd | qsim 0.22 | Qiskit Aer 0.17 | Speed-up vs. best |
+| Circuit | Qubits | Precision | Qevedo | qsim 0.22 | Qiskit Aer 0.17 | Speed-up vs. best |
 |---|---|---|---|---|---|---|
 | Random | 26 | single | **0.43 s** | 1.84 s | 5.51 s | 4.3× |
 | Random | 28 | single | **2.09 s** | 7.63 s | 23.0 s | 3.7× |
@@ -86,21 +86,21 @@ transform.
 | QFT | 28 | single | **0.98 s** | 43.2 s | 12.1 s | 12.3× |
 | QFT | 30 | single | **4.44 s** | 192 s | 45.7 s | 10.3× |
 
-qvd's times include allocating the state; the others include sampling one
+Qevedo's times include allocating the state; the others include sampling one
 shot, and qsim's include converting the circuit in Python. qsim's CPU
 backend is single precision only. Amplitudes were checked against Qiskit Aer
 (maximum difference 7×10⁻¹³ in double precision).
 
 ### Clifford circuits
 
-![Stabilizer benchmark: qvd vs Stim vs Qiskit Aer](benchmarks/charts/stabilizer.svg)
+![Stabilizer benchmark: Qevedo vs Stim vs Qiskit Aer](benchmarks/charts/stabilizer.svg)
 
 Rotated surface code memory experiments (d rounds), 10,000 shots, from the
-same OpenQASM file. qvd on 8 P-cores (single-threaded in brackets); Stim is
+same OpenQASM file. Qevedo on 8 P-cores (single-threaded in brackets); Stim is
 single-threaded. Details are in
 [docs/DESIGN.md](docs/DESIGN.md#7-stabilizer-backend-stabilizer).
 
-| Distance | Qubits | Gates | Measurements | qvd, 8 P-cores (1 thread) | Stim 1.16, reference + `FlipSimulator` | Stim `sample()` | Qiskit Aer 0.17 stabilizer |
+| Distance | Qubits | Gates | Measurements | Qevedo, 8 P-cores (1 thread) | Stim 1.16, reference + `FlipSimulator` | Stim `sample()` | Qiskit Aer 0.17 stabilizer |
 |---|---|---|---|---|---|---|---|
 | 11 | 241 | 6,160 | 1,441 | **0.001 s** (0.003 s) | 0.004 s | 0.11 s | 10.8 s |
 | 21 | 881 | 44,520 | 9,681 | **0.010 s** (0.018 s) | 0.036 s | 0.32 s | 636 s |
@@ -108,9 +108,9 @@ single-threaded. Details are in
 | 101 | 20,401 | 5,110,600 | 1,040,401 | **1.5 s** (4.4 s) | 12.4 s | 131 s | — |
 
 These runs shared the machine with a virtual machine using 6–14 cores, so
-absolute times are a little high; the qvd 8-core column was measured under
+absolute times are a little high; the Qevedo 8-core column was measured under
 the heavier load ([details](benchmarks/README.md#clifford-circuits)). Stim's `sample()` returns shot-major arrays and is much slower
-here; its flip simulator returns measurement-major results, as qvd does,
+here; its flip simulator returns measurement-major results, as Qevedo does,
 and is the fairer comparison.
 
 The stabilizer backend runs a Stim-style reference shot on an inverse
@@ -128,12 +128,12 @@ Stim's times in this table were measured with one instruction per line
 by 1.7× at d = 21 and 1.07× at d = 51, measured on the 4-vCPU VM. The
 script now groups consecutive instructions as Stim's own circuits do. The
 fair comparison, re-run on that VM, is in the next section; there Stim and
-qvd are within 1.3× of each other at d = 11 and 21, and qvd's lead starts
+Qevedo are within 1.3× of each other at d = 11 and 21, and Qevedo's lead starts
 at d = 51.
 
 ### Noisy Clifford circuits (error correction)
 
-![Noisy stabilizer benchmark: qvd vs Stim](benchmarks/charts/noise.svg)
+![Noisy stabilizer benchmark: Qevedo vs Stim](benchmarks/charts/noise.svg)
 
 The same surface codes with uniform circuit-level depolarizing noise of
 strength p = 0.001 (`library::with_depolarizing_noise`):
@@ -142,20 +142,20 @@ strength p = 0.001 (`library::with_depolarizing_noise`):
 - a bit flip before every measurement and after every reset.
 
 These match Stim's generated circuits with all their noise parameters set
-to p. Both simulators run the same Stim file, written by qvd, with one
+to p. Both simulators run the same Stim file, written by Qevedo, with one
 instruction per layer and channel. 10,000 shots, measured on a 4-vCPU Xeon
 virtual machine (not the i9 above); Stim is single-threaded.
 
-| Distance | Qubits | qvd, 4 vCPUs (1 thread) | Stim 1.16, reference + `FlipSimulator` | Stim `sample()` | Without noise: qvd, 4 vCPUs (1 thread) | Stim, reference + `FlipSimulator` |
+| Distance | Qubits | Qevedo, 4 vCPUs (1 thread) | Stim 1.16, reference + `FlipSimulator` | Stim `sample()` | Without noise: Qevedo, 4 vCPUs (1 thread) | Stim, reference + `FlipSimulator` |
 |---|---|---|---|---|---|---|
 | 11 | 241 | 0.009 s (**0.007 s**) | 0.008 s | 0.046 s | **0.005 s** (0.005 s) | 0.006 s |
 | 21 | 881 | **0.040 s** (0.050 s) | 0.060 s | 0.51 s | 0.037 s (**0.030 s**) | 0.039 s |
 | 51 | 5,201 | **0.54 s** (0.90 s) | 1.54 s | 13.3 s | **0.40 s** (0.57 s) | 0.83 s |
 | 101 | 20,401 | **6.0 s** (14.9 s) | 37.5 s | 375 s | **4.1 s** (8.9 s) | 26.7 s |
 
-With noise, qvd is 1.1–2.5× faster than Stim on one thread and 1.5–6.3×
+With noise, Qevedo is 1.1–2.5× faster than Stim on one thread and 1.5–6.3×
 faster on 4 vCPUs from d = 21 up. At d = 11 the run takes a few milliseconds
-and the two are level. Errors cost little: qvd draws the gap to the next
+and the two are level. Errors cost little: Qevedo draws the gap to the next
 error (geometrically distributed) instead of a random number per qubit and
 shot, as Stim does. Its reference shot, the largest part at d = 101, does
 not see the noise.
@@ -164,7 +164,7 @@ The two agree statistically. A detector (a stabilizer compared with its
 value in the round before) fires at the same rate in both, within
 sampling error. 200,000 shots, `benchmarks/bench_noise.py`:
 
-| Code | p | Detectors | qvd detection rate | Stim detection rate | Largest \|z\| over detectors |
+| Code | p | Detectors | Qevedo detection rate | Stim detection rate | Largest \|z\| over detectors |
 |---|---|---|---|---|---|
 | d = 3, 3 rounds | 0.001 | 16 | 0.011983 | 0.011900 | 1.57 |
 | d = 5, 5 rounds | 0.001 | 96 | 0.013543 | 0.013561 | 2.42 |
@@ -181,7 +181,7 @@ errors.
 
 Decoders do not take measurement records but detection events: which
 detectors (parities of measurements that are fixed without noise) fired,
-and whether the logical observable flipped. qvd reads Stim's circuit
+and whether the logical observable flipped. Qevedo reads Stim's circuit
 format with its `DETECTOR` and `OBSERVABLE_INCLUDE` annotations, `REPEAT`
 blocks and measurement-flip probabilities (`M(p)`), and samples detection
 events as Stim's detector sampler does, so Stim's own generated circuits
@@ -190,27 +190,27 @@ and the tools around them run unchanged.
 Stim's `surface_code:rotated_memory_z`, d rounds, with all four of its
 noise parameters at p = 0.001, 10,000 shots, the same text in both. Both
 return shot-major NumPy arrays (detectors, observables), in one Python
-process: bool, or bit-packed with eight detectors per byte. qvd's time
+process: bool, or bit-packed with eight detectors per byte. Qevedo's time
 includes reading the text, and Stim's compiling its sampler. Measured on a
 4-vCPU Xeon virtual machine (2.1 GHz, not the one of the table above);
 Stim is single-threaded (`benchmarks/bench_output.py`,
 `results/output.csv`).
 
-| Distance | Detectors | qvd, 4 vCPUs | qvd, 1 thread | Stim 1.16 `compile_detector_sampler().sample` | qvd bit-packed, 4 vCPUs (1 thread) | Stim, `bit_packed=True` |
+| Distance | Detectors | Qevedo, 4 vCPUs | Qevedo, 1 thread | Stim 1.16 `compile_detector_sampler().sample` | Qevedo bit-packed, 4 vCPUs (1 thread) | Stim, `bit_packed=True` |
 |---|---|---|---|---|---|---|
 | 11 | 1,320 | 0.009 s | 0.012 s | 0.055 s | **0.009 s** (0.010 s) | 0.045 s |
 | 21 | 9,240 | 0.080 s | 0.179 s | 0.593 s | **0.052 s** (0.090 s) | 0.423 s |
 | 51 | 132,600 | 1.13 s | 1.97 s | 10.1 s | **0.99 s** (1.78 s) | 12.5 s |
 | 101 | 1,030,200 | — | — | — | **13.6 s** (34.0 s) | 303 s |
 
-With bool arrays, qvd is 2.4–5.1× faster than the faster of Stim's two
+With bool arrays, Qevedo is 2.4–5.1× faster than the faster of Stim's two
 outputs on one thread, and 5.0–9.0× on 4 vCPUs. Bit-packed against
 bit-packed, it is 4.5–8.9× faster on one thread and 5.0–22.3× on 4 vCPUs.
 Stim's bit-packed output is slower than its bool output at d = 51 (as in
 every run here), which widens the gap there. At d = 101 only the
 bit-packed outputs fit: the result is 1.3 GB, where a bool array would be
 10 GB on a 15 GB machine. The raw measurement records of `sample`
-(measurement-major in qvd, shot-major in Stim's `compile_sampler`) show
+(measurement-major in Qevedo, shot-major in Stim's `compile_sampler`) show
 the same: 0.72 s against Stim's 11.8 s at d = 51, and bit-packed at
 d = 101 7.9 s against 312 s (20.9 s on one thread).
 
@@ -218,7 +218,7 @@ The statistics agree. 200,000 shots of each code, decoded by the same
 PyMatching decoder (built from Stim's detector error model),
 `benchmarks/bench_detectors.py`:
 
-| Code | p | Detectors | Detection rate, qvd / Stim | Largest \|z\| over detectors | Logical error rate, qvd / Stim | \|z\| |
+| Code | p | Detectors | Detection rate, Qevedo / Stim | Largest \|z\| over detectors | Logical error rate, Qevedo / Stim | \|z\| |
 |---|---|---|---|---|---|---|
 | d = 3, 3 rounds | 0.001 | 24 | 0.012322 / 0.012200 | 2.29 | 0.000825 / 0.000635 | 2.22 |
 | d = 5, 5 rounds | 0.001 | 120 | 0.014646 / 0.014570 | 2.95 | 0.000145 / 0.000075 | 2.11 |
@@ -241,7 +241,7 @@ lattice surgery, and measurement-only versions of the surface and toric
 codes are written with `MPP` (`MPP X0*X1 Z2*Z3*Z4*Z5`). Hardware noise
 models add two-qubit Pauli channels with uneven probabilities
 (`PAULI_CHANNEL_2`) and correlated errors (`E(p) X0 X1`, with
-`ELSE_CORRELATED_ERROR` for mutually exclusive alternatives). qvd reads
+`ELSE_CORRELATED_ERROR` for mutually exclusive alternatives). Qevedo reads
 all three. Each `MPP` product becomes rotations to Z, a CX ladder onto
 one of its qubits, a Z measurement and the same gates undone, so the
 reference shot and the frames need no new code. A chain of correlated
@@ -255,19 +255,19 @@ toric code, every stabilizer measured with `MPP(p)` for L rounds, with
 shots of detection events (shot-major bool), on the same 4-vCPU machine
 type as the table above:
 
-| L | Qubits | Detectors | qvd, 4 vCPUs | qvd, 1 thread | Stim 1.16 `compile_detector_sampler().sample` |
+| L | Qubits | Detectors | Qevedo, 4 vCPUs | Qevedo, 1 thread | Stim 1.16 `compile_detector_sampler().sample` |
 |---|---|---|---|---|---|
 | 10 | 200 | 2,000 | 0.021 s | **0.019 s** | 0.083 s |
 | 20 | 800 | 16,000 | **0.162 s** | 0.173 s | 1.116 s |
 | 30 | 1,800 | 54,000 | **0.787 s** | 0.898 s | 4.310 s |
 
-qvd is 4.0–6.9× faster than Stim here (4.4–6.5× on one thread). Four
+Qevedo is 4.0–6.9× faster than Stim here (4.4–6.5× on one thread). Four
 threads gain at most 1.14× at these sizes (and lose 10% at L = 10).
 
 The statistics agree (`results/mpp_agreement.csv`, 200,000 shots each;
 every noiseless run gave no detection events at all):
 
-| Code | p | Detectors | Detection rate, qvd / Stim | Largest \|z\| over detectors | Logical error rate, qvd / Stim | \|z\| |
+| Code | p | Detectors | Detection rate, Qevedo / Stim | Largest \|z\| over detectors | Logical error rate, Qevedo / Stim | \|z\| |
 |---|---|---|---|---|---|---|
 | L = 3, 3 rounds | 0.003 | 54 | 0.019126 / 0.018965 | 2.62 | 0.001095 / 0.001005 | 0.88 |
 | L = 5, 5 rounds | 0.002 | 250 | 0.012692 / 0.012665 | 2.61 | 0.000075 / 0.000010 | 3.15 |
@@ -286,7 +286,7 @@ million at p = 0.01, 0.0122548 / 0.0121862 (z = 0.88) at L = 3 and
 the 54 detectors at L = 3. No difference keeps its sign from one run to
 the next.
 The parts are checked exactly as well: in the Python tests, on 300
-random Clifford circuits with random `MPP` products, qvd's outcomes span
+random Clifford circuits with random `MPP` products, Qevedo's outcomes span
 the same affine space as Stim's with the same per-bit rates, and the Rust
 tests compare `MPP` against
 the reference state vector, `PAULI_CHANNEL_2`'s order against Stim's,
@@ -300,32 +300,32 @@ and noise on the other backends.
 
 ### Low-entanglement circuits (MPS)
 
-![MPS benchmark: qvd vs Qiskit Aer vs quimb](benchmarks/charts/mps.svg)
+![MPS benchmark: Qevedo vs Qiskit Aer vs quimb](benchmarks/charts/mps.svg)
 
 1000 shots each, the same truncation in all three (at most χ singular
 values per bond, discarded weight below 10⁻¹⁶), 8 threads. Random 1D
 circuits are brick-pattern versions of the random circuits above; the grid
 circuit applies CZ on all four coupler orientations of an 8×8 grid in turn.
 
-| Circuit | χ cap | qvd | Qiskit Aer 0.17 MPS | quimb 1.15 `CircuitPermMPS` | Fidelity estimate |
+| Circuit | χ cap | Qevedo | Qiskit Aer 0.17 MPS | quimb 1.15 `CircuitPermMPS` | Fidelity estimate |
 |---|---|---|---|---|---|
 | Random 1D, 64 qubits, depth 10 | 256 | **0.018 s** | 0.25 s | 10.3 s | 1 (exact, χ = 32) |
 | Random 1D, 64 qubits, depth 20 | 256 | **8.5 s** | 114 s | 31.9 s | 1.8×10⁻⁵ |
 | Random 1D, 100 qubits, depth 16 | 128 | **1.9 s** | 18.0 s | 25.5 s | 7.6×10⁻⁷ |
 | Random 8×8 grid, depth 10 | 64 | **6.3 s** | 10.2 s | 18.4 s | 10⁻¹⁶ |
 | QFT, 100 qubits | 256 | **0.040 s** | 0.11 s | 21.7 s | 1 (χ = 1) |
-| Random 1D, 64 qubits, depth 12, labels scrambled | 64 | **0.049 s** | 21.3 s | 26.6 s | 1 (qvd), 2×10⁻¹³ (quimb) |
+| Random 1D, 64 qubits, depth 12, labels scrambled | 64 | **0.049 s** | 21.3 s | 26.6 s | 1 (Qevedo), 2×10⁻¹³ (quimb) |
 
-qvd's fidelity estimates agree with quimb's to four digits on the 1D
+Qevedo's fidelity estimates agree with quimb's to four digits on the 1D
 circuits. Low numbers are the circuits' entanglement exceeding χ, not
 numerical trouble: on a 4×5 grid small enough to check against the exact
 state, the estimate tracks the true overlap within a factor of two.
 quimb's time is mostly sampling, which it does shot by shot in Python.
 On the last row the circuit's qubit labels are permuted at random, as for a
-circuit written for other hardware. qvd places the qubits on the chain by
+circuit written for other hardware. Qevedo places the qubits on the chain by
 their interactions first, so the circuit stays exact at χ = 64; the others
 route every gate as long-range. The runs shared the machine with a busy
-virtual machine (qvd's column was measured last, under the heavier load).
+virtual machine (Qevedo's column was measured last, under the heavier load).
 
 The MPS is SVD-bound. Gates that cannot truncate run in parallel layers.
 Gates that may truncate run one at a time, so that every truncation sees
@@ -340,9 +340,9 @@ Random Clifford+T circuits (`library::random_clifford_t`: layers of random
 one-qubit Cliffords and CX on random pairs, with T gates on random qubits),
 1000 shots, 8 threads.
 
-![Clifford+T benchmark: qvd vs Qiskit Aer](benchmarks/charts/nearclifford.svg)
+![Clifford+T benchmark: Qevedo vs Qiskit Aer](benchmarks/charts/nearclifford.svg)
 
-| Circuit | Peak active qubits | qvd near-Clifford | qvd state vector | Qiskit Aer state vector | Aer extended stabilizer (approximate) | Aer MPS |
+| Circuit | Peak active qubits | Qevedo near-Clifford | Qevedo state vector | Qiskit Aer state vector | Aer extended stabilizer (approximate) | Aer MPS |
 |---|---|---|---|---|---|---|
 | 24 qubits, depth 20, 10 T | 10 | **0.003 s** | 0.55 s | 2.9 s | 508 s | > 600 s |
 | 30 qubits, depth 20, 12 T | 12 | **0.003 s** | 51 s | 210 s | > 600 s | > 600 s |
@@ -350,7 +350,7 @@ one-qubit Cliffords and CX on random pairs, with T gates on random qubits),
 | 100 qubits, depth 30, 24 T | 23 | **0.85 s** | — | — | over its 63-qubit limit | > 600 s |
 | 200 qubits, depth 40, 20 T | 20 | **0.11 s** | — | — | over its 63-qubit limit | > 600 s |
 
-Runs were stopped at 600 s. The state vector is double precision (qvd's
+Runs were stopped at 600 s. The state vector is double precision (Qevedo's
 30-qubit run spends most of its time on the CX gates between random qubit
 pairs, which fuse poorly). The CX layers make these circuits highly
 entangled, which is why the MPS methods cannot follow.
@@ -370,7 +370,7 @@ shots cost little more than one.
 
 ### Expectation values (Pauli propagation)
 
-![Pauli propagation benchmark: qvd vs IBM pauli-prop](benchmarks/charts/pauliprop.svg)
+![Pauli propagation benchmark: Qevedo vs IBM pauli-prop](benchmarks/charts/pauliprop.svg)
 
 `<Z62>` of the kicked Ising circuit of IBM's utility experiment (Kim et
 al., Nature 618, 500 (2023)): 127 qubits on the Eagle heavy-hex lattice,
@@ -378,7 +378,7 @@ each step `RX(θ_h)` on every qubit and `RZZ(-π/2)` on all 144 couplers.
 Strings with coefficients below the threshold are dropped, the same in
 both. Measured on a 4-vCPU Xeon virtual machine, not the i9 above.
 
-| Steps | θ_h | Threshold | Value | Strings | qvd, 4 threads | qvd, 1 thread | IBM pauli-prop 0.2.1, total | pauli-prop, propagation only |
+| Steps | θ_h | Threshold | Value | Strings | Qevedo, 4 threads | Qevedo, 1 thread | IBM pauli-prop 0.2.1, total | pauli-prop, propagation only |
 |---|---|---|---|---|---|---|---|---|
 | 20 | 0.2 | 10⁻⁵ | 0.978495 | 25,041 | **0.25 s** | 0.25 s | 5.7 s | 1.2 s |
 | 20 | 0.4 | 10⁻⁵ | 0.834608 | 1,162,230 | **9.6 s** | 27.4 s | 191 s | 152 s |
@@ -422,12 +422,12 @@ or 31 in double**, and that ceiling holds for every simulator. No credible
 source shows a general 40-qubit simulation on one workstation: the records
 (45 qubits in 2017, 50 in 2025) used supercomputers. Larger qubit counts on
 one machine are possible only for circuits with structure: Clifford
-circuits (qvd's stabilizer backend handles 20,000 qubits in seconds),
-Clifford circuits with a few non-Clifford gates (qvd's near-Clifford
+circuits (Qevedo's stabilizer backend handles 20,000 qubits in seconds),
+Clifford circuits with a few non-Clifford gates (Qevedo's near-Clifford
 backend: 200 qubits with 20 T gates in a tenth of a second),
-low-entanglement circuits (qvd's MPS backend: 100 qubits and more),
+low-entanglement circuits (Qevedo's MPS backend: 100 qubits and more),
 expectation values of observables that stay sparse in the Pauli basis
-(qvd's Pauli propagation: 127 qubits and up to 1024), or a few amplitudes
+(Qevedo's Pauli propagation: 127 qubits and up to 1024), or a few amplitudes
 rather than the whole state.
 
 ## Usage

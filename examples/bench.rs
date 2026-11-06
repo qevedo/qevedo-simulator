@@ -15,7 +15,7 @@ fn run<T: Real>(circuit: &Circuit, options: &Options, amplitudes: Option<&str>) 
     let (state, stats) = statevector::<T>(circuit, options).unwrap();
     let total = start.elapsed().as_secs_f64();
     println!(
-        "qvd {}: {} qubits, {} gates -> {} fused -> {} passes, gates {:.3} s, total {:.3} s (incl. allocation), norm {:.6}",
+        "Qevedo {}: {} qubits, {} gates -> {} fused -> {} passes, gates {:.3} s, total {:.3} s (incl. allocation), norm {:.6}",
         std::any::type_name::<T>(),
         circuit.num_qubits,
         stats.gates,

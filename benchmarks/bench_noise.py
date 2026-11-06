@@ -1,4 +1,4 @@
-"""Noisy surface codes: qvd's stabilizer backend against Stim, for speed and
+"""Noisy surface codes: Qevedo's stabilizer backend against Stim, for speed and
 for agreement of the sampled statistics.
 
     cargo build --release --example stabilizer
@@ -9,15 +9,15 @@ Every case is `library::surface_code(d, d)` with uniform circuit-level
 depolarizing noise of strength p (`library::with_depolarizing_noise`),
 written by the `stabilizer` example in Stim's format, so both simulators run
 exactly the same noisy circuit (p = 0 is the noiseless circuit). The file
-has one instruction per layer and channel, as Stim's generated circuits do. Timing: qvd on all cores and on one thread
+has one instruction per layer and channel, as Stim's generated circuits do. Timing: Qevedo on all cores and on one thread
 (best of 3, the example's printed time); Stim 1 thread, `reference_sample()`
-plus a `FlipSimulator` (measurement-major results, as qvd's) and
+plus a `FlipSimulator` (measurement-major results, as Qevedo's) and
 `compile_sampler().sample()` (shot-major), best of 3 (1 run at d = 101).
 
 Agreement: a detector is the XOR of two consecutive measurements of the same
 qubit (an ancilla's stabilizer in consecutive rounds), which never fires
 without noise. For smaller codes, the fraction of shots in which each
-detector fires is compared between qvd (through the Python package) and
+detector fires is compared between Qevedo (through the Python package) and
 Stim's sampler, with a two-sample z-score per detector.
 
 Writes results/noise.csv and results/noise_agreement.csv.
@@ -82,7 +82,7 @@ def time_stim(circuit, shots, repeats):
 
 
 def from_stim_text(text):
-    """The qvd circuit of a Stim file written by qvd's `to_stim`."""
+    """The Qevedo circuit of a Stim file written by Qevedo's `to_stim`."""
     from qevedo.simulator import Circuit
 
     lines = [line.split() for line in text.splitlines() if line.strip()]

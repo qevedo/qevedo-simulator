@@ -87,7 +87,7 @@ They pass on Qiskit 2.5.2 and 2.0.3.
   `benchmarks/compare_examples.py` (`results/examples_before_after*.csv`).
 
 **Why.** Item 2 of the previous entry's list. These were the
-instructions most likely to stop a Stim file in qvd's reader. `MPP` is
+instructions most likely to stop a Stim file in Qevedo's reader. `MPP` is
 how Floquet codes (the honeycomb code), lattice surgery and
 measurement-only surface and toric codes are written. `PAULI_CHANNEL_2`
 and correlated errors are how calibrated, Pauli-twirled hardware noise
@@ -100,7 +100,7 @@ to end today. Item 1 (noise on near-Clifford frames) serves fewer users.
 
 **Measured** (4-vCPU Xeon VM at 2.1 GHz, complete runs of both scripts).
 Toric-code memory with `MPP(p)`, `PAULI_CHANNEL_2` and E/ELSE chains,
-p = 0.001, 10,000 shots of detection events: L = 10 / 20 / 30, qvd on 4
+p = 0.001, 10,000 shots of detection events: L = 10 / 20 / 30, Qevedo on 4
 vCPUs 0.021 / 0.162 / 0.787 s, on 1 thread 0.019 / 0.173 / 0.898 s;
 Stim's detector sampler 0.083 / 1.116 / 4.310 s (4.0–6.9× on 4 vCPUs,
 4.4–6.5× on one thread). Agreement (200,000 shots): detection rates
@@ -181,7 +181,7 @@ d = 101, 10,000 shots of detection events are 10 GB as bools and do not
 fit this 15 GB machine, but they are 1.3 GB packed, the layout decoders
 and Stim's users already handle. A search of recent work (stabilizer
 simulators on GPUs, Quantum 2026; STABSim, arXiv:2507.03092; SymPhase)
-found no detector-sampling method that would beat qvd's current approach
+found no detector-sampling method that would beat Qevedo's current approach
 on CPUs. Making the Python results as fast as the Rust ones was the most
 useful step that could be verified end to end today. The other candidates
 (noise on near-Clifford frames, `MPP` in the reader) are features fewer
@@ -268,7 +268,7 @@ far wider than any difference. The Stim-format `detectors` mode came out
   flips and inversions. `M(p)` flips are drawn after the run with
   geometric gaps; the frame loop did not change.
 - Python: `sample_detectors(circuit, shots)` takes Stim text, a
-  `stim.Circuit` or a qvd `Circuit`, and returns shot-major bool arrays as
+  `stim.Circuit` or a Qevedo `Circuit`, and returns shot-major bool arrays as
   Stim's detector sampler does (written straight into the buffer NumPy
   views); `from_stim`; `sample` accepts Stim text.
 - The `stabilizer` example's `detectors <file> <shots>` mode, and
@@ -277,15 +277,15 @@ far wider than any difference. The Stim-format `detectors` mode came out
 **Why.** Item 1 of the previous entry's list, and what kept the noisy
 stabilizer backend from being used: error-correction work starts from
 Stim circuit files (Stim's generators and the tools built on them) and
-ends in a decoder that takes detection events. Before this run, qvd could
-sample a noisy circuit only after it had been rebuilt by hand in qvd's
+ends in a decoder that takes detection events. Before this run, Qevedo could
+sample a noisy circuit only after it had been rebuilt by hand in Qevedo's
 API, and the user then had to compute detectors from raw records. The
 method is Stim's (Gidney, *Quantum* 5, 497, 2021, arXiv:2103.02202). It
 could be checked end to end today: against Stim's own generated circuits,
 detector by detector and through the same decoder. A search of recent
 work turned up no published detector-sampling method that beats Stim's
 reference-plus-frames approach in practice, so matching Stim's interface
-at qvd's speed was the most useful step. The other candidates (noise on
+at Qevedo's speed was the most useful step. The other candidates (noise on
 the near-Clifford frames, a compact Pauli-propagation store) improve
 features that fewer people use.
 
@@ -293,7 +293,7 @@ features that fewer people use.
 Stim's generated rotated surface code, p = 0.001 on all four of its noise
 parameters, 10,000 shots, shot-major bool arrays from both:
 
-| d | qvd, 4 threads | qvd, 1 thread | Stim `sample` | Stim `sample(bit_packed=True)` |
+| d | Qevedo, 4 threads | Qevedo, 1 thread | Stim `sample` | Stim `sample(bit_packed=True)` |
 |---|---|---|---|---|
 | 11 | 0.015 s | 0.013 s | 0.049 s | 0.037 s |
 | 21 | 0.112 s | 0.136 s | 0.560 s | 0.359 s |
@@ -304,7 +304,7 @@ Detection rates agree (largest |z| 2.29–3.90 over 24–720 detectors,
 standard errors in four of five codes, in both directions. A long run of
 the d = 3 code (24 million shots each, `--long`) found every detector and
 the observable in agreement (largest |z| 1.64). Calibrating by hand with
-one million shots at d = 5, p = 0.005 gave the same: qvd against Stim
+one million shots at d = 5, p = 0.005 gave the same: Qevedo against Stim
 looked like Stim against Stim with another seed, pairwise detector
 correlations included (mean z² 0.96–0.99 for both). Existing benchmarks
 before and after, interleaved best of 5 (11 for the closest cases):
@@ -356,7 +356,7 @@ now also keeps each classical bit's reference value.
 
 **Why.** Roadmap item 6, and the gap that kept the stabilizer backend from
 its main use: error-correction studies sample noisy circuits, and before
-this run qvd could only sample noiseless ones, so its lead over Stim held
+this run Qevedo could only sample noiseless ones, so its lead over Stim held
 only on a workload nobody runs. It is Stim's own method (Gidney, *Quantum*
 5, 497, 2021, arXiv:2103.02202). It can be checked end to end today:
 exactly against summed error combinations, and statistically against Stim
@@ -366,7 +366,7 @@ a calibrated backend selector) improve features that already work.
 **Measured** (4-vCPU Xeon VM; `benchmarks/results/noise*.csv`). Surface
 codes with p = 0.001, 10,000 shots, the same Stim file in both:
 
-| d | qvd, 4 threads | qvd, 1 thread | Stim reference + `FlipSimulator` |
+| d | Qevedo, 4 threads | Qevedo, 1 thread | Stim reference + `FlipSimulator` |
 |---|---|---|---|
 | 11 | 0.009 s | 0.007 s | 0.008 s |
 | 21 | 0.040 s | 0.050 s | 0.060 s |
@@ -391,15 +391,15 @@ pass-to-pass spread on this VM.
 - A circuit written one target per line costs Stim a lot: 14 GB and a kill
   at d = 51 with noise, and 1.7× its time at d = 21 without. The recorded
   noiseless Stim times (`stabilizer.csv`, the i9) were measured that way,
-  so they flatter qvd at d = 11 and 21. `compare_stim.py` now groups
-  instructions. Re-timed fairly on the VM without noise, qvd and Stim are
+  so they flatter Qevedo at d = 11 and 21. `compare_stim.py` now groups
+  instructions. Re-timed fairly on the VM without noise, Qevedo and Stim are
   level at d = 11 and 21 (0.005 / 0.006 s, 0.030 / 0.039 s on one thread);
-  at d = 51 and 101 qvd stays 1.4× and 3.0× faster on one thread. The README
+  at d = 51 and 101 Qevedo stays 1.4× and 3.0× faster on one thread. The README
   says this next to the i9 table.
 
 **Next.**
 1. A Stim-format reader with `DETECTOR`, `OBSERVABLE_INCLUDE` and `M(p)`,
-   so qvd runs Stim's generated circuits directly and returns detection
+   so Qevedo runs Stim's generated circuits directly and returns detection
    events (what decoders such as PyMatching take), and a logical-error-rate
    example.
 2. Noise on the near-Clifford backend's per-shot frames (noisy

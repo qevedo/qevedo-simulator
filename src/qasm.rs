@@ -1,7 +1,7 @@
 //! Reading OpenQASM 2 and 3 programs.
 //!
 //! The gates of `qelib1.inc` (OpenQASM 2) and `stdgates.inc` (OpenQASM 3) map
-//! to qvd's gates, natively where qvd has the gate and as exact unitaries
+//! to Qevedo's gates, natively where Qevedo has the gate and as exact unitaries
 //! otherwise (`csx`, `cu3`, `cu`, `c3x`, `c3sqrtx`, `c4x`), and through their
 //! `qelib1.inc` definitions for the relative-phase Toffolis (`rccx`,
 //! `rc3x`). Programs can
@@ -70,7 +70,7 @@ pub fn parse(source: &str) -> Result<Circuit, QasmError> {
 }
 
 /// Gates of `qelib1.inc` defined by their decomposition rather than mapped
-/// to a qvd gate: the relative-phase Toffolis, whose phases are what their
+/// to a Qevedo gate: the relative-phase Toffolis, whose phases are what their
 /// definitions make them (from `qelib1.inc`, the OpenQASM 2 standard
 /// library).
 const PRELUDE: &str = "
@@ -585,7 +585,7 @@ impl Parser {
                 return self.error(
                     &token,
                     format!(
-                        "`{w}` is not supported (qvd runs gates, measurements and resets only)"
+                        "`{w}` is not supported (the Qevedo simulator runs gates, measurements and resets only)"
                     ),
                 );
             }
@@ -1213,7 +1213,7 @@ pub fn gate(name: &str, p: &[f64]) -> Option<Result<Gate, String>> {
         "rxx" => expect(1).map(|_| Gate::RXX(p[0])),
         "ccx" | "toffoli" => fixed(0, Gate::CCX),
         "cswap" | "fredkin" => fixed(0, Gate::CSWAP),
-        // Not native in qvd: exact unitaries, controls first.
+        // Not native in Qevedo: exact unitaries, controls first.
         "csx" => expect(0).map(|_| Gate::Unitary(Gate::SX.matrix().controlled(1, 1))),
         "cu3" => {
             expect(3).map(|_| Gate::Unitary(Gate::U(p[0], p[1], p[2]).matrix().controlled(1, 1)))

@@ -1,25 +1,25 @@
 # Benchmarks
 
 Recorded results, the scripts that produced them, and the charts drawn from
-them. Every comparison runs the same OpenQASM file, written by qvd, through
+them. Every comparison runs the same OpenQASM file, written by Qevedo, through
 each simulator.
 
 ```
 benchmarks/
 ├── results/
 │   ├── machine.json            hardware, versions, measurement notes
-│   ├── statevector.csv         dense simulation: qvd vs qsim vs Qiskit Aer
-│   ├── stabilizer.csv          Clifford circuits: qvd vs Stim vs Qiskit Aer
-│   ├── noise.csv               noisy (and noiseless) surface codes: qvd vs Stim
-│   ├── noise_agreement.csv     detection rates of noisy codes: qvd vs Stim
-│   ├── detectors*.csv          detection events of Stim's circuits: qvd vs Stim
-│   ├── output.csv              records and detection events into NumPy: qvd vs Stim
-│   ├── output_before_after.csv the same, two qvd builds interleaved (0.1.3 vs 0.1.4)
-│   ├── mpp*.csv                MPP toric-code memory with correlated errors: qvd vs Stim
+│   ├── statevector.csv         dense simulation: Qevedo vs qsim vs Qiskit Aer
+│   ├── stabilizer.csv          Clifford circuits: Qevedo vs Stim vs Qiskit Aer
+│   ├── noise.csv               noisy (and noiseless) surface codes: Qevedo vs Stim
+│   ├── noise_agreement.csv     detection rates of noisy codes: Qevedo vs Stim
+│   ├── detectors*.csv          detection events of Stim's circuits: Qevedo vs Stim
+│   ├── output.csv              records and detection events into NumPy: Qevedo vs Stim
+│   ├── output_before_after.csv the same, two Qevedo builds interleaved (0.1.3 vs 0.1.4)
+│   ├── mpp*.csv                MPP toric-code memory with correlated errors: Qevedo vs Stim
 │   ├── examples_before_after*.csv the Rust examples, two builds interleaved (0.1.4 vs 0.1.5)
-│   ├── mps.csv                 matrix product states: qvd vs Qiskit Aer vs quimb
-│   ├── nearclifford.csv        Clifford+T circuits: qvd vs Qiskit Aer
-│   ├── pauliprop.csv           expectation values: qvd vs IBM's pauli-prop
+│   ├── mps.csv                 matrix product states: Qevedo vs Qiskit Aer vs quimb
+│   ├── nearclifford.csv        Clifford+T circuits: Qevedo vs Qiskit Aer
+│   ├── pauliprop.csv           expectation values: Qevedo vs IBM's pauli-prop
 │   └── stabilizer_steps.csv    how each optimisation changed the d=101 time
 ├── charts/                     SVGs drawn from results/ by plot.py
 ├── compare.py                  times Qiskit Aer and qsim on a QASM file
@@ -33,7 +33,7 @@ benchmarks/
 ├── compare_mps.py              times Qiskit Aer's and quimb's MPS simulators
 ├── compare_nearclifford.py     times Qiskit Aer's methods on Clifford+T circuits
 ├── compare_pauliprop.py        times IBM's pauli-prop on an expectation value
-├── bench_pauliprop.py          runs qvd and pauli-prop on every case -> pauliprop.csv
+├── bench_pauliprop.py          runs Qevedo and pauli-prop on every case -> pauliprop.csv
 └── plot.py                     results/*.csv -> charts/*.svg
 ```
 
@@ -53,7 +53,7 @@ stim 1.16.0, quimb 1.15.0. Measured on 2026-10-09.
 
 Random circuits are depth-20 Google-style circuits (√X, √Y, √W on every
 qubit and CZ on a brick pattern); QFT is the quantum Fourier transform.
-Each simulator gets its best of 16 or 32 threads. qvd's times include
+Each simulator gets its best of 16 or 32 threads. Qevedo's times include
 allocating the state; the others include sampling one shot, and qsim's
 include converting the circuit in Python. qsim's CPU backend is single
 precision only. Amplitudes agree with Qiskit Aer to 7×10⁻¹³ in double
@@ -63,19 +63,19 @@ precision.
 
 ![Stabilizer benchmark](charts/stabilizer.svg)
 
-Rotated surface-code memory experiments, d rounds, 10,000 shots. qvd ran
+Rotated surface-code memory experiments, d rounds, 10,000 shots. Qevedo ran
 on a pool of 8 P-cores and on one thread; Stim is single-threaded. Stim is
 timed two ways:
 - `reference_sample()` plus a `FlipSimulator`, whose results are
-  measurement-major like qvd's (the fair comparison);
+  measurement-major like Qevedo's (the fair comparison);
 - `compile_sampler().sample(bit_packed=True)`, which returns shot-major
   arrays and is much slower at these sizes.
 
 Qiskit Aer's stabilizer method was not run past d = 21 (it took 636 s
-there). A virtual machine shared the machine: Stim, Aer and qvd on one
-thread ran while it used about six cores, and qvd on 8 P-cores was
+there). A virtual machine shared the machine: Stim, Aer and Qevedo on one
+thread ran while it used about six cores, and Qevedo on 8 P-cores was
 re-measured after the parallel reference shot while it used about 14. So
-absolute times are a little high, and pessimistic for qvd's 8-core column.
+absolute times are a little high, and pessimistic for Qevedo's 8-core column.
 
 ![Stabilizer optimisation steps](charts/stabilizer_steps.svg)
 
@@ -99,20 +99,20 @@ p = 0.001 (`library::with_depolarizing_noise`), and without it (p = 0 rows
 in `noise.csv`), 10,000 shots. Measured on the 4-vCPU Xeon virtual machine
 (`pauliprop_machine` in `machine.json`), not the i9. Both simulators read
 the same Stim file written by the `stabilizer` example (`--stim`), with one
-instruction per layer and channel as in Stim's generated circuits. qvd ran
+instruction per layer and channel as in Stim's generated circuits. Qevedo ran
 on 4 threads and on 1 (best of 3); Stim on one thread, best of 3 (one run
 at d = 101). `noise_agreement.csv` compares the fraction of shots in which
 each detector fires (XOR of consecutive measurements of one ancilla),
-qvd through the Python package against Stim's sampler, 200,000 shots each,
+Qevedo through the Python package against Stim's sampler, 200,000 shots each,
 with a two-sample z-score per detector.
 
 ## Stim circuits and detection events
 
 Stim's own generated circuits (`surface_code:rotated_memory_z`, d rounds,
-all four noise parameters at p = 0.001), read by qvd's Stim reader, against
+all four noise parameters at p = 0.001), read by Qevedo's Stim reader, against
 Stim's detector sampler, 10,000 shots (`detectors.csv`). Measured on a
 4-vCPU Xeon virtual machine (`detectors_machine` in `machine.json`). Both
-run in one Python process and return shot-major NumPy bool arrays; qvd on
+run in one Python process and return shot-major NumPy bool arrays; Qevedo on
 4 threads and on 1, its time including reading the text; Stim on one
 thread, with and without `bit_packed=True`; best of 3. Distance 101 is
 left out: a shot-major result of a million detectors × 10,000 shots is
@@ -125,7 +125,7 @@ the smallest code with 24 million shots per simulator, per detector.
 
 `bench_output.py` (`output.csv`) times what a Python user gets back from
 the same generated codes (p = 0.001, 10,000 shots, best of 3; once at
-d = 101): raw measurement records from qvd's `sample` (measurement-major,
+d = 101): raw measurement records from Qevedo's `sample` (measurement-major,
 bool or eight shots per byte) against Stim's `compile_sampler().sample`
 (shot-major, bool or bit-packed; Stim has no measurement-major output
 from its sampler), and detection events from both simulators, shot-major,
@@ -147,7 +147,7 @@ round: `DEPOLARIZE1(p)` on every qubit, a biased `PAULI_CHANNEL_2` (ZZ at
 p/3, XX at p/6, the others at p/30) on the horizontal and vertical edge
 of every vertex, and L correlated chains `E(p) X X;
 ELSE_CORRELATED_ERROR(p) Z Z` on random pairs. `mpp.csv`: 10,000 shots of
-detection events, shot-major bool, best of 3; qvd on 4 threads and 1,
+detection events, shot-major bool, best of 3; Qevedo on 4 threads and 1,
 Stim's detector sampler on one. `mpp_agreement.csv`: detection rates and
 logical error rates after PyMatching (from Stim's detector error model,
 `approximate_disjoint_errors=True` for the chains), 200,000 shots, plus
@@ -172,7 +172,7 @@ that run.
 ![MPS benchmark](charts/mps.svg)
 
 1000 shots, χ capped as labelled and the smallest singular values dropped
-while their squares sum below 10⁻¹⁶, in all three simulators. qvd ran on 8
+while their squares sum below 10⁻¹⁶, in all three simulators. Qevedo ran on 8
 P-cores (best of three), Qiskit Aer with 8 threads, quimb's
 `CircuitPermMPS` with 8 BLAS threads after a warm-up. Aer reports only a
 total; `mps.csv` has gate and sampling times for the other two, and the
@@ -185,7 +185,7 @@ runs, for all three alike.
 
 Random Clifford+T circuits from `library::random_clifford_t` (layers of
 random one-qubit Cliffords and CX on random pairs, T gates on random
-qubits), 1000 shots, 8 threads. qvd's near-Clifford time is the best of
+qubits), 1000 shots, 8 threads. Qevedo's near-Clifford time is the best of
 three; every Aer method ran in its own process, stopped at 600 s. Aer's
 `extended_stabilizer` is approximate and rejects circuits over 63 qubits;
 there is no state vector past 30 qubits. A virtual machine shared the
@@ -199,7 +199,7 @@ machine during these runs.
 on `library::eagle_heavy_hex`), the same coefficient threshold in both.
 Measured on a different machine from the rest of this page: a cloud
 virtual machine with 4 vCPUs of an Intel Xeon at 2.80 GHz and 15 GB
-(`pauliprop_machine` in `machine.json`). qvd ran on 4 threads and on 1
+(`pauliprop_machine` in `machine.json`). Qevedo ran on 4 threads and on 1
 (best of 3); pauli-prop 0.2.1 ran once per case in its own process, on
 one thread (its CPU time matched its wall time), with `max_terms` well
 above what each case needs so that only the threshold truncates. Its
@@ -214,7 +214,7 @@ number of strings and the same dropped one-norm in every case.
 python3 -m venv .bench-venv
 .bench-venv/bin/pip install qiskit qiskit-aer qsimcirq cirq-core ply stim matplotlib quimb
 
-# State vector: qvd's time is printed; the QASM file feeds the others.
+# State vector: Qevedo's time is printed; the QASM file feeds the others.
 cargo run --release --example bench -- random 28 20 f32 4 14 --qasm /tmp/c.qasm
 .bench-venv/bin/python benchmarks/compare.py /tmp/c.qasm --precision single --threads 32
 
@@ -250,7 +250,7 @@ cargo run --release --example nearclifford -- 100 30 24 1000 --qasm /tmp/n.qasm
 .bench-venv/bin/python benchmarks/compare_nearclifford.py /tmp/n.qasm --shots 1000 \
     --methods matrix_product_state,extended_stabilizer
 
-# Pauli propagation: every case, qvd and pauli-prop (pip install pauli-prop).
+# Pauli propagation: every case, Qevedo and pauli-prop (pip install pauli-prop).
 cargo build --release --example pauliprop
 .bench-venv/bin/python benchmarks/bench_pauliprop.py
 

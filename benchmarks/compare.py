@@ -43,7 +43,7 @@ def run_qsim(path, precision, threads, statevector):
     sim = qsimcirq.QSimSimulator(qsim_options=options)
     start = time.perf_counter()
     if statevector:
-        # Reverse the order so qubit 0 is the least significant bit, as in qvd and Qiskit.
+        # Reverse the order so qubit 0 is the least significant bit, as in Qevedo and Qiskit.
         result = sim.simulate(circuit, qubit_order=list(reversed(qubits)))
         state = result.final_state_vector
     else:
@@ -59,7 +59,7 @@ def main():
     parser.add_argument("--precision", default="single")
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--shots", type=int, default=1)
-    parser.add_argument("--check", help="qvd amplitudes file to compare with")
+    parser.add_argument("--check", help="Qevedo amplitudes file to compare with")
     parser.add_argument("--skip", default="", help="comma-separated: aer,qsim")
     args = parser.parse_args()
     skip = set(filter(None, args.skip.split(",")))
@@ -81,7 +81,7 @@ def main():
         ours = np.loadtxt(args.check)
         ours = ours[:, 0] + 1j * ours[:, 1]
         error = np.max(np.abs(ours - reference[: len(ours)]))
-        print(f"qvd vs aer: max amplitude difference {error:.2e} over {len(ours)} amplitudes")
+        print(f"Qevedo vs aer: max amplitude difference {error:.2e} over {len(ours)} amplitudes")
 
 
 if __name__ == "__main__":

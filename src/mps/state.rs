@@ -245,7 +245,7 @@ impl Mps {
     }
 
     /// Apply a `2^k x 2^k` unitary to `qubits` (bit `j` of the matrix
-    /// index is `qubits[j]`, as everywhere in qvd).
+    /// index is `qubits[j]`, as everywhere in Qevedo).
     pub fn apply(&mut self, matrix: &Matrix, qubits: &[usize]) {
         self.apply_gates(&[(matrix, qubits)]);
     }

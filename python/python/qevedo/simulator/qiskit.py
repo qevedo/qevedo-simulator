@@ -66,8 +66,8 @@ from qevedo.simulator import statevector as _qvd_statevector
 
 __all__ = ["QevedoSimulator", "QevedoJob", "QevedoSampler", "QevedoEstimator", "from_qiskit"]
 
-# Qiskit's gate names that qvd's `Circuit.gate` reads, with the same
-# matrices (including the phases of u2, u3, cu and cu3), by qvd's name.
+# Qiskit's gate names that Qevedo's `Circuit.gate` reads, with the same
+# matrices (including the phases of u2, u3, cu and cu3), by Qevedo's name.
 _NATIVE = {
     name: name
     for name in (
@@ -82,8 +82,8 @@ _NATIVE["c3sx"] = "c3sqrtx"
 # Gates that run as their matrix rather than through their definitions.
 _MAX_MATRIX_QUBITS = 4
 
-# Pauli propagation takes qvd's gates except arbitrary unitaries on two or
-# more qubits, which qvd uses for these: they go through their definitions.
+# Pauli propagation takes Qevedo's gates except arbitrary unitaries on two or
+# more qubits, which Qevedo uses for these: they go through their definitions.
 _NOT_PROPAGATED = {"csx", "cu", "cu3", "c3sx"}
 
 # Aer's method names, for code written against AerSimulator.

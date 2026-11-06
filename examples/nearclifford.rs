@@ -51,7 +51,7 @@ fn main() {
         .install(|| qvd::run::<f64>(&circuit, shots, &options))
         .unwrap();
     println!(
-        "qvd {backend:?}: {n} qubits, depth {depth}, {t_count} T, {} gates: gates {:.3} s, {shots} shots {:.3} s, total {:.3} s; peak active {:?}",
+        "Qevedo {backend:?}: {n} qubits, depth {depth}, {t_count} T, {} gates: gates {:.3} s, {shots} shots {:.3} s, total {:.3} s; peak active {:?}",
         result.stats.gates,
         result.stats.gate_seconds,
         result.stats.measure_seconds,

@@ -552,7 +552,7 @@ def test_output_allocator_is_checked():
 def test_bit_packed_detectors_in_stims_layout():
     stim = pytest.importorskip("stim")
     np = pytest.importorskip("numpy")
-    # Without noise, Stim's and qvd's packed detectors are identical (all
+    # Without noise, Stim's and Qevedo's packed detectors are identical (all
     # zero), and so are their shapes; with certain errors, identical too.
     circuit = stim.Circuit.generated("repetition_code:memory", distance=5, rounds=3)
     theirs = circuit.compile_detector_sampler().sample(10, bit_packed=True, append_observables=True)

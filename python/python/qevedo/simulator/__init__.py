@@ -1,4 +1,4 @@
-"""qvd: a fast quantum circuit simulator, as ``qevedo.simulator``.
+"""The Qevedo simulator: a fast quantum circuit simulator, as ``qevedo.simulator``.
 
 Build circuits with :class:`Circuit` (or read OpenQASM 2/3 with
 :meth:`Circuit.from_qasm`, or pass a Qiskit ``QuantumCircuit``; for a
@@ -104,7 +104,7 @@ def run(
     truncation_threshold: float = 1e-16,
     threads: int | str | None = None,
 ) -> RunResult:
-    """Sample ``shots`` shots of a circuit (a qvd ``Circuit``, a Qiskit
+    """Sample ``shots`` shots of a circuit (a Qevedo ``Circuit``, a Qiskit
     ``QuantumCircuit``, or OpenQASM 2/3 text).
 
     ``backend`` is one of ``"auto"``, ``"statevector"``, ``"stabilizer"``,
@@ -223,7 +223,7 @@ def from_stim(text) -> tuple[Circuit, list[list[int]], list[list[int]]]:
     Returns the ``Circuit`` (measurement ``m``, in Stim's order, is
     classical bit ``m``; ``REPEAT`` blocks are unrolled), the detectors and
     the observables, each a list of measurement indices. Fails on
-    instructions qvd cannot run, naming the line.
+    instructions Qevedo cannot run, naming the line.
     """
     return _circuit_from_stim(str(text))
 
@@ -241,7 +241,7 @@ def sample_detectors(
     circuit, as Stim's detector sampler returns them.
 
     ``circuit`` is Stim's text format, a ``stim.Circuit`` (for example from
-    ``stim.Circuit.generated``), or a qvd ``Circuit`` (exported with
+    ``stim.Circuit.generated``), or a Qevedo ``Circuit`` (exported with
     ``to_stim``, so without detectors). A detector fires when the parity of
     its measurements differs from the noiseless circuit's.
 

@@ -1,10 +1,10 @@
-"""Run a Clifford OpenQASM 2 circuit (as written by qvd) on Stim and Qiskit Aer's
+"""Run a Clifford OpenQASM 2 circuit (as written by Qevedo) on Stim and Qiskit Aer's
 stabilizer method, for timing.
 
     python benchmarks/compare_stim.py circuit.qasm [--shots N] [--skip aer]
 
 Stim is timed two ways: `compile_sampler().sample()` (shot-major output) and
-`reference_sample()` plus a `FlipSimulator` (measurement-major, like qvd).
+`reference_sample()` plus a `FlipSimulator` (measurement-major, like Qevedo).
 """
 
 import argparse
@@ -63,7 +63,7 @@ def main():
     total = time.perf_counter() - start
     print(f"stim sample(): compile (reference sample) {compiled:.3f} s, total with {args.shots} shots {total:.3f} s")
     # sample() returns shot-major bits, which costs a transposition; the
-    # flip simulator leaves them measurement-major, as qvd does.
+    # flip simulator leaves them measurement-major, as Qevedo does.
     import stim
 
     start = time.perf_counter()

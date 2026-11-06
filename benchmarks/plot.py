@@ -49,6 +49,11 @@ COLORS = {
 }
 
 
+def display(name):
+    """Legend text for a simulator: the results call this simulator "qvd"."""
+    return {"qvd": "Qevedo"}.get(name, name)
+
+
 def read(name):
     with open(RESULTS / name, newline="") as f:
         return list(csv.DictReader(f))
@@ -75,7 +80,7 @@ def statevector():
     for i, sim in enumerate(simulators):
         xs = [c + (i - 1) * width for c, case in enumerate(cases) if case in times[sim]]
         ys = [times[sim][case] for case in cases if case in times[sim]]
-        bars = ax.bar(xs, ys, width, label=sim, color=COLORS[sim])
+        bars = ax.bar(xs, ys, width, label=display(sim), color=COLORS[sim])
         if sim == "qvd":
             ax.bar_label(bars, labels=[f"{y:g}" for y in ys], fontsize=8, padding=2)
     ax.set_yscale("log")
@@ -101,8 +106,8 @@ def stabilizer():
         series[name].append((int(r["qubits"]), float(r["seconds"]), int(r["distance"])))
     fig, ax = plt.subplots(figsize=(7.5, 4.6))
     labels = {
-        "qvd": "qvd, 8 P-cores",
-        "qvd, 1 thread": "qvd, 1 thread",
+        "qvd": "Qevedo, 8 P-cores",
+        "qvd, 1 thread": "Qevedo, 1 thread",
         "stim, flip simulator": "Stim, reference + FlipSimulator",
         "stim, sample()": "Stim, compile_sampler().sample()",
         "qiskit-aer, stabilizer": "Qiskit Aer, stabilizer",
@@ -160,7 +165,7 @@ def mps():
     for i, sim in enumerate(simulators):
         xs = [c + (i - 1) * width for c in range(len(cases))]
         ys = [times[sim][case] for case in cases]
-        bars = ax.bar(xs, ys, width, label=sim, color=COLORS[sim])
+        bars = ax.bar(xs, ys, width, label=display(sim), color=COLORS[sim])
         if sim == "qvd":
             ax.bar_label(bars, labels=[f"{y:g}" for y in ys], fontsize=8, padding=2)
     ax.set_yscale("log")
@@ -200,8 +205,8 @@ def nearclifford():
         "qiskit-aer, matrix_product_state",
     ]
     labels = {
-        "qvd, near-Clifford": "qvd near-Clifford",
-        "qvd, state vector": "qvd state vector",
+        "qvd, near-Clifford": "Qevedo near-Clifford",
+        "qvd, state vector": "Qevedo state vector",
         "qiskit-aer, statevector": "Aer state vector",
         "qiskit-aer, extended_stabilizer": "Aer extended stabilizer (approximate)",
         "qiskit-aer, matrix_product_state": "Aer MPS",
@@ -256,8 +261,8 @@ def pauliprop():
     threads = next(r["threads"] for r in rows if r["simulator"] == "qvd" and r["threads"] != "1")
     series = ["qvd", "qvd, 1 thread", "pauli-prop", "pauli-prop, propagation only"]
     labels = {
-        "qvd": f"qvd, {threads} threads",
-        "qvd, 1 thread": "qvd, 1 thread",
+        "qvd": f"Qevedo, {threads} threads",
+        "qvd, 1 thread": "Qevedo, 1 thread",
         "pauli-prop": "IBM pauli-prop, total",
         "pauli-prop, propagation only": "IBM pauli-prop, propagation only",
     }
@@ -289,8 +294,8 @@ def noise():
         series[name].append((int(r["qubits"]), float(r["seconds"]), int(r["distance"])))
     fig, ax = plt.subplots(figsize=(7.5, 4.6))
     labels = {
-        "qvd": "qvd, 4 vCPUs",
-        "qvd, 1 thread": "qvd, 1 thread",
+        "qvd": "Qevedo, 4 vCPUs",
+        "qvd, 1 thread": "Qevedo, 1 thread",
         "stim, flip simulator": "Stim, reference + FlipSimulator",
         "stim, sample()": "Stim, compile_sampler().sample()",
     }

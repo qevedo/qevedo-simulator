@@ -60,7 +60,7 @@ fn main() {
         .filter(|&c| samples.get(0, c))
         .count();
     println!(
-        "qvd stabilizer: {} qubits, {} gates, {} measurements, {} shots: {:.3} s ({ones} ones in shot 0's first 64 bits)",
+        "Qevedo stabilizer: {} qubits, {} gates, {} measurements, {} shots: {:.3} s ({ones} ones in shot 0's first 64 bits)",
         circuit.num_qubits,
         circuit.gate_count(),
         measurements,
@@ -96,7 +96,7 @@ fn detectors(path: &str, shots: usize) {
     let transposed = start.elapsed().as_secs_f64();
     let fired = bytes.iter().filter(|&&b| b == 1).count();
     println!(
-        "qvd detectors: {} qubits, {} measurements, {} detectors, {} shots: read {parsed:.3} s, \
+        "Qevedo detectors: {} qubits, {} measurements, {} detectors, {} shots: read {parsed:.3} s, \
          sample {sampled:.3} s, shot-major {transposed:.3} s (detection rate {:.6})",
         circuit.circuit.num_qubits,
         circuit.num_measurements(),

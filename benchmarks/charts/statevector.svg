@@ -1997,24 +1997,27 @@ z
 " style="fill: #d1495b"/>
     </g>
     <g id="text_24">
-     <!-- qvd -->
+     <!-- Qevedo -->
      <g transform="translate(82.800781 38.916563) scale(0.1 -0.1)">
-      <use xlink:href="#DejaVuSans-54"/>
-      <use xlink:href="#DejaVuSans-59" transform="translate(63.484375 0)"/>
-      <use xlink:href="#DejaVuSans-47" transform="translate(122.671875 0)"/>
+      <use xlink:href="#DejaVuSans-34"/>
+      <use xlink:href="#DejaVuSans-48" transform="translate(78.71875 0)"/>
+      <use xlink:href="#DejaVuSans-59" transform="translate(140.25 0)"/>
+      <use xlink:href="#DejaVuSans-48" transform="translate(199.4375 0)"/>
+      <use xlink:href="#DejaVuSans-47" transform="translate(260.96875 0)"/>
+      <use xlink:href="#DejaVuSans-52" transform="translate(324.453125 0)"/>
      </g>
     </g>
     <g id="patch_30">
-     <path d="M 121.416406 38.916563 
-L 141.416406 38.916563 
-L 141.416406 31.916563 
-L 121.416406 31.916563 
+     <path d="M 141.364844 38.916563 
+L 161.364844 38.916563 
+L 161.364844 31.916563 
+L 141.364844 31.916563 
 z
 " style="fill: #00798c"/>
     </g>
     <g id="text_25">
      <!-- qsim -->
-     <g transform="translate(149.416406 38.916563) scale(0.1 -0.1)">
+     <g transform="translate(169.364844 38.916563) scale(0.1 -0.1)">
       <use xlink:href="#DejaVuSans-54"/>
       <use xlink:href="#DejaVuSans-56" transform="translate(63.484375 0)"/>
       <use xlink:href="#DejaVuSans-4c" transform="translate(115.578125 0)"/>
@@ -2022,16 +2025,16 @@ z
      </g>
     </g>
     <g id="patch_31">
-     <path d="M 193.492969 38.916563 
-L 213.492969 38.916563 
-L 213.492969 31.916563 
-L 193.492969 31.916563 
+     <path d="M 213.441406 38.916563 
+L 233.441406 38.916563 
+L 233.441406 31.916563 
+L 213.441406 31.916563 
 z
 " style="fill: #edae49"/>
     </g>
     <g id="text_26">
      <!-- qiskit-aer -->
-     <g transform="translate(221.492969 38.916563) scale(0.1 -0.1)">
+     <g transform="translate(241.441406 38.916563) scale(0.1 -0.1)">
       <use xlink:href="#DejaVuSans-54"/>
       <use xlink:href="#DejaVuSans-4c" transform="translate(63.484375 0)"/>
       <use xlink:href="#DejaVuSans-56" transform="translate(91.265625 0)"/>

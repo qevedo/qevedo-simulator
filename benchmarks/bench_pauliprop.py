@@ -1,10 +1,10 @@
-"""Time qvd's Pauli propagation against IBM's pauli-prop and write results/pauliprop.csv.
+"""Time Qevedo's Pauli propagation against IBM's pauli-prop and write results/pauliprop.csv.
 
     cargo build --release --example pauliprop
     python benchmarks/bench_pauliprop.py [--repeats 3]
 
 Each case is IBM's 127-qubit kicked Ising circuit (library::kicked_ising on
-library::eagle_heavy_hex) and the observable Z62. qvd runs on all threads and
+library::eagle_heavy_hex) and the observable Z62. Qevedo runs on all threads and
 on one (best of --repeats each); pauli-prop runs once, in its own process,
 through benchmarks/compare_pauliprop.py with --max-terms set well above the
 terms the case needs, so that only the coefficient threshold truncates.

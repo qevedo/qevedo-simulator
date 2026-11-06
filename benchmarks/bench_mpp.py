@@ -1,6 +1,6 @@
 """Pauli product measurements (`MPP`), `PAULI_CHANNEL_2` and correlated
 errors (`E`, `ELSE_CORRELATED_ERROR`): a toric-code memory in Stim's
-format, sampled by qvd and by Stim.
+format, sampled by Qevedo and by Stim.
 
     cd python && maturin develop --release && cd ..
     pip install stim pymatching
@@ -18,7 +18,7 @@ also with the initial |0...0> and the final data measurement); the
 observable is a Z logical.
 
 Timing (results/mpp.csv): 10,000 shots of detection events, shot-major
-bool NumPy arrays, best of 3 in one process; qvd on 4 threads and on 1
+bool NumPy arrays, best of 3 in one process; Qevedo on 4 threads and on 1
 (its time includes reading the text), Stim's `compile_detector_sampler()`
 on its one thread (including compiling).
 
@@ -114,7 +114,7 @@ def timing(sizes, shots, p):
             seconds = best_of(3, lambda: sample_detectors(text, shots, seed=1, threads=threads))
             rows.append(dict(common, simulator="qvd", method="sample_detectors", version=VERSION,
                              threads=threads, seconds=f"{seconds:.3f}"))
-            print(f"  qvd, {threads} threads: {seconds:.3f} s", flush=True)
+            print(f"  Qevedo, {threads} threads: {seconds:.3f} s", flush=True)
         seconds = best_of(3, lambda: stim.Circuit(text).compile_detector_sampler(seed=1)
                           .sample(shots, separate_observables=True))
         rows.append(dict(common, simulator="stim", method="compile_detector_sampler().sample",

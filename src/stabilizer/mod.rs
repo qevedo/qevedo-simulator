@@ -1151,7 +1151,7 @@ fn flip_records(samples: &mut Samples, circuit: &crate::stim::StimCircuit, rng: 
 /// circuit: gates are lowered to Stim's `H`, `S`, `S_DAG`, Paulis, `CX`,
 /// `CZ` and `SWAP` (dropping global phases), noise channels keep their
 /// Stim names. Stim numbers measurement results in the order they happen,
-/// which are qvd's classical bits when each bit is written once, in
+/// which are Qevedo's classical bits when each bit is written once, in
 /// increasing order (as in [`crate::library::surface_code`]). Fails on
 /// non-Clifford gates.
 pub fn to_stim(circuit: &Circuit) -> Result<String, String> {

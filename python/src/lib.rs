@@ -1,4 +1,4 @@
-//! Python bindings of qvd: the native module `qevedo.simulator._native`.
+//! Python bindings of Qevedo: the native module `qevedo.simulator._native`.
 //! The Python package `qevedo.simulator` wraps it with documentation and
 //! NumPy conversions.
 
@@ -916,7 +916,7 @@ fn choose_backend(
     Ok(backend_name(chosen).to_string())
 }
 
-/// Whether qvd was compiled for AVX2 + FMA (x86-64-v3) kernels.
+/// Whether Qevedo was compiled for AVX2 + FMA (x86-64-v3) kernels.
 #[pyfunction]
 fn uses_avx2() -> bool {
     cfg!(all(

@@ -1,6 +1,6 @@
 # qevedo-simulator
 
-Python bindings of [qvd](https://github.com/qevedo/qevedo-simulator), a fast
+Python bindings of [Qevedo](https://github.com/qevedo/qevedo-simulator), a fast
 quantum circuit simulator written in Rust. It installs as
 `qevedo-simulator` and imports as `qevedo.simulator`.
 
@@ -132,7 +132,7 @@ evs = QevedoEstimator().run([(qc, ["ZZ", "XX"])]).result()[0].data.evs          
 
 - `QevedoSimulator` runs circuits with `run`, so it picks the method the same
   way and reports it in `result.results[i].metadata["method"]`. Options:
-  `shots`, `seed_simulator`, `method` (qvd's or Aer's names), `precision`,
+  `shots`, `seed_simulator`, `method` (Qevedo's or Aer's names), `precision`,
   `max_bond_dimension`, `truncation_threshold`, `threads`, `memory`.
   Qiskit's `BackendSamplerV2` and `BackendEstimatorV2` work on it too.
 - `QevedoSampler` returns one `BitArray` per classical register. Measurements

@@ -51,7 +51,7 @@ fn main() {
         .unwrap();
     let total = start.elapsed().as_secs_f64();
     println!(
-        "qvd: <{observable}> after {steps} steps at θ_h = {theta_h}: {:.6} (dropped one-norm {:.3e}), \
+        "Qevedo: <{observable}> after {steps} steps at θ_h = {theta_h}: {:.6} (dropped one-norm {:.3e}), \
          {} rotations, peak {} terms, final {}, {total:.3} s on {threads} threads",
         result.value,
         result.truncated_one_norm,

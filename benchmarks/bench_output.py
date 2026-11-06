@@ -1,4 +1,4 @@
-"""The cost of handing results to Python: qvd's `sample` (raw measurement
+"""The cost of handing results to Python: Qevedo's `sample` (raw measurement
 records) and `sample_detectors` (detection events) on Stim's generated
 surface codes, as NumPy bool arrays and bit-packed, against Stim's
 equivalents.
@@ -10,10 +10,10 @@ equivalents.
 Every circuit is `stim.Circuit.generated("surface_code:rotated_memory_z",
 distance=d, rounds=d, ...)` with all four noise parameters at p = 0.001,
 the same text in both simulators, 10,000 shots, best of 3, in one Python
-process. qvd runs on 4 threads and on 1, Stim on its one.
+process. Qevedo runs on 4 threads and on 1, Stim on its one.
 
 Measurement records (`sample`):
-- qvd `sample(text, shots)`: measurement-major, shape (measurements, shots),
+- Qevedo `sample(text, shots)`: measurement-major, shape (measurements, shots),
   bool; with `bit_packed=True`, uint8 with eight shots per byte.
 - Stim `compile_sampler().sample(shots)`: shot-major, shape (shots,
   measurements), bool; and with `bit_packed=True`. Stim has no

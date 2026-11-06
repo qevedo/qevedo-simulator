@@ -59,7 +59,7 @@ fn main() {
         .unwrap();
     let stats = &result.stats;
     println!(
-        "qvd mps: {kind} {size}, depth {depth}, {} gates, χ ≤ {max_bond}: gates {:.3} s, {shots} shots {:.3} s, total {:.3} s; max bond {}, fidelity {:.3e}",
+        "Qevedo mps: {kind} {size}, depth {depth}, {} gates, χ ≤ {max_bond}: gates {:.3} s, {shots} shots {:.3} s, total {:.3} s; max bond {}, fidelity {:.3e}",
         stats.gates,
         stats.gate_seconds,
         stats.measure_seconds,

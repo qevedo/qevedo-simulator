@@ -1,4 +1,4 @@
-//! qvd: a quantum circuit simulator built for memory bandwidth.
+//! Qevedo: a quantum circuit simulator built for memory bandwidth.
 //!
 //! The state vector is stored in cache-line blocks of split real and
 //! imaginary parts, gates are applied by AVX2 kernels that run at the

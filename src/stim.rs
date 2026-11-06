@@ -4,7 +4,7 @@
 //! *Quantum* 5, 497, 2021): Stim's own generators, and the tools around it,
 //! emit noisy Clifford circuits whose `DETECTOR` and `OBSERVABLE_INCLUDE`
 //! lines say which measurement results a decoder looks at. This module
-//! reads such a file into a [`StimCircuit`]: a qvd [`Circuit`] with one
+//! reads such a file into a [`StimCircuit`]: a Qevedo [`Circuit`] with one
 //! classical bit per measurement, in the order Stim numbers them, plus the
 //! detectors and observables as lists of those measurements.
 //! [`crate::stabilizer::sample_detectors`] then samples detection events

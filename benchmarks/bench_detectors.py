@@ -1,4 +1,4 @@
-"""Detection events of Stim's own generated circuits: qvd's Stim reader and
+"""Detection events of Stim's own generated circuits: Qevedo's Stim reader and
 detector sampling against Stim's detector sampler, for speed, for the
 sampled statistics and for decoded logical error rates.
 
@@ -13,12 +13,12 @@ flips after resets and before measurements). Both simulators get the same
 text.
 
 Timing, in one process, both returning shot-major NumPy bool arrays
-(detectors, observables): qvd's `sample_detectors` on 4 threads and on 1
+(detectors, observables): Qevedo's `sample_detectors` on 4 threads and on 1
 (this includes reading the text and unrolling its REPEAT block), and
 Stim's `compile_detector_sampler().sample(shots, separate_observables=True)`
 (single-threaded; compiling includes its reference sample), and the same
 with `bit_packed=True` (eight detectors per byte). Best of 3, one run at
-d = 101. qvd's bit-packed output is timed by `bench_output.py`.
+d = 101. Qevedo's bit-packed output is timed by `bench_output.py`.
 
 Agreement: the rate at which each detector fires, 200,000 shots, seed 1 in
 both, with a two-sample z-score per detector; and the logical error rate
@@ -86,7 +86,7 @@ def timing(distances, shots, p):
             seconds = best_of(repeats, lambda: sample_detectors(text, shots, seed=1, threads=threads))
             rows.append(dict(common, simulator="qvd", method="sample_detectors", version=VERSION,
                              threads=threads, seconds=f"{seconds:.3f}"))
-            print(f"  qvd, {threads} threads: {seconds:.3f} s", flush=True)
+            print(f"  Qevedo, {threads} threads: {seconds:.3f} s", flush=True)
         seconds = best_of(repeats, lambda: stim.Circuit(text).compile_detector_sampler(seed=1)
                           .sample(shots, separate_observables=True))
         rows.append(dict(common, simulator="stim", method="compile_detector_sampler().sample",
