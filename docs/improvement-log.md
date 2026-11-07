@@ -3,6 +3,10 @@
 One entry per improvement run: what changed, why, what it measured, and
 what to try next. Newest first.
 
+See [experiments.md](experiments.md) for the short index: what worked, what
+didn't (and why), what was considered, and the current next steps. Read it
+before choosing a change, and update it in the same commit.
+
 ## 2026-11-06 — Pauli noise on the near-Clifford backend (0.1.8)
 
 0.1.7 was never published: CI's newer clippy (Rust 1.99, against 1.97
