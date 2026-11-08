@@ -34,7 +34,7 @@ Newest first. Details are in `improvement-log.md` under the same date.
 
 | Date | Version | Change | Effect |
 |---|---|---|---|
-| 2026-11-08 | 0.1.9 | Noisy near-Clifford compiled once into a program for the groups, run one group at a time depth first (`noisy.rs`); consecutive noise channels of one probability as one run of sites; dense measurement as one gather into the half-size state (`Dense::retired`, all dense measurements) | Noisy cases 1.7–4.1× faster than 0.1.8; against Clifft 1.8–4.9× slower (was 3.4–17.8×), 1.23× faster at 200 qubits on 4 threads; noiseless near-Clifford example 4.6× faster, same counts |
+| 2026-11-08 | 0.1.9 (on master; not on PyPI yet: release job hit an HTTP 504) | Noisy near-Clifford compiled once into a program for the groups, run one group at a time depth first (`noisy.rs`); consecutive noise channels of one probability as one run of sites; dense measurement as one gather into the half-size state (`Dense::retired`, all dense measurements) | Noisy cases 1.7–4.1× faster than 0.1.8; against Clifft 1.8–4.9× slower (was 3.4–17.8×), 1.23× faster at 200 qubits on 4 threads; noiseless near-Clifford example 4.6× faster, same counts |
 | 2026-11-06 | 0.1.8 | Pauli noise on the near-Clifford backend (`nearclifford/noisy.rs`): one shared Clifford frame per batch, a Pauli frame per shot, a dense state per group (as Clifft, Chase & Labib, arXiv:2604.27058). 0.1.7 never published: CI's newer clippy rejected `drain(..).collect()`; fixed in 0.1.8 | Noisy Clifford+T circuits run, with exact statistics (χ² p = 0.385 / 0.893 / 0.861 at 200k shots). Within 1.3–1.4× of Clifft without errors, 3.4–17.8× slower with them; noiseless path unchanged |
 | 2026-11-06 | 0.1.6 | Qiskit backend and primitives (`qevedo.simulator.qiskit`: QevedoSimulator, QevedoSampler, QevedoEstimator), from an interactive session | 6.6–32× faster than Aer through `backend.run` on QV 20–28; estimator 5.5–30× faster |
 | 2026-11-04 | 0.1.5 | Stim reader: `MPP` (basis rotations plus a CX ladder), `PAULI_CHANNEL_2`, correlated `E`/`ELSE_CORRELATED_ERROR` | Toric code L = 10/20/30: 0.021/0.162/0.787 s against Stim's 0.083/1.116/4.310 s (4.0–6.9×) |
@@ -109,6 +109,7 @@ what new fact would justify another attempt.
 
 ## Method lessons
 
+- **Release workflow flakes** (2026-11-08): 0.1.9's Release run failed only because the macOS arm64 job got HTTP 504 installing maturin; nothing was published. Check which job failed before suspecting the code; a rerun of the failed jobs is the owner's call.
 - **Profiling without perf** (2026-11-08): no `perf` on the VM. Temporary `Instant` timers per operation kind in the hot loop (and a count of amplitudes touched) found the bottleneck within minutes; per-amplitude ns from those counts told memory-bound from compute-bound. Remove them before committing.
 - **Python environments** (2026-11-08): `/usr/local/bin/pip` belongs to Python 3.13 while `python3` is 3.11, and Clifft needs ≥ 3.12. Make one `python3.13 -m venv` per build (before / after) and install each wheel there; `compare_noisy_builds.py` takes the two interpreters.
 - **Comparing counts across builds:** Python's `hash()` of a string is salted per process; use `hashlib`.

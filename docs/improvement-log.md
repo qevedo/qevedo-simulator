@@ -100,6 +100,13 @@ that no error has told apart.
 - A fresh `Vec` per dense measurement above 128 KB comes from `mmap` and
   pays page faults each time; one reused buffer per batch avoids it.
 
+**Release.** `Release 0.1.9` (297db10) is on master and its CI passed,
+but the Release workflow (run 42467315708) failed in one job: the macOS
+arm64 wheel could not download maturin (HTTP 504 from GitHub, three
+tries). Every other wheel, the sdist and the checks passed; publishing was
+skipped, so 0.1.9 is not on PyPI and qevedo.com was left unchanged.
+Re-running the failed jobs of that run should publish it.
+
 **Next.**
 1. Per-shot sign registers instead of frame words: for each rotation and
    measurement, the parity of the errors that flip it, precomputed per
