@@ -20,18 +20,29 @@ pub(super) struct Pauli {
 }
 
 impl Pauli {
-    /// `P|i> = c |i ^ x>`: the coefficient `c`.
+    /// `P|i> = c |i ^ x>`: the coefficient `c`, which is
+    /// `phase() * sign(i)`.
+    #[cfg(test)]
     fn coefficient(&self, i: usize) -> C64 {
-        let mut c = match (self.x & self.z).count_ones() % 4 {
+        self.phase() * self.sign(i)
+    }
+
+    /// `(-1)^negative i^{|x & z|}`: the part of the coefficient that does
+    /// not depend on the index.
+    fn phase(&self) -> C64 {
+        let c = match (self.x & self.z).count_ones() % 4 {
             0 => C64::new(1.0, 0.0),
             1 => C64::new(0.0, 1.0),
             2 => C64::new(-1.0, 0.0),
             _ => C64::new(0.0, -1.0),
         };
-        if self.negative ^ ((self.z & i as u64).count_ones() % 2 == 1) {
-            c = -c;
-        }
-        c
+        if self.negative { -c } else { c }
+    }
+
+    /// `(-1)^{|z & i|}`, as `±1`.
+    #[inline(always)]
+    fn sign(&self, i: usize) -> f64 {
+        1.0 - 2.0 * ((self.z & i as u64).count_ones() & 1) as f64
     }
 
     pub fn is_identity(&self) -> bool {
@@ -49,6 +60,28 @@ unsafe impl Sync for Shared {}
 impl Shared {
     fn get(self) -> *mut C64 {
         self.0
+    }
+}
+
+/// `f(0) + ... + f(count - 1)`, in parallel for large counts.
+fn sum(count: usize, f: impl Fn(usize) -> f64 + Sync + Send) -> f64 {
+    if count >= PARALLEL / 2 {
+        (0..count)
+            .into_par_iter()
+            .with_min_len(PARALLEL / 8)
+            .map(f)
+            .sum()
+    } else {
+        (0..count).map(f).sum()
+    }
+}
+
+/// Append `f(0), ..., f(count - 1)` to `out`, in parallel for large counts.
+fn gather(out: &mut Vec<C64>, count: usize, f: impl Fn(usize) -> C64 + Sync + Send) {
+    if count >= PARALLEL {
+        out.par_extend((0..count).into_par_iter().with_min_len(PARALLEL / 4).map(f));
+    } else {
+        out.extend((0..count).map(f));
     }
 }
 
@@ -76,7 +109,9 @@ impl Dense {
         self.amps.resize(2 * len, C64::new(0.0, 0.0));
     }
 
-    /// Remove the qubit at `position`, which must be |0>.
+    /// Remove the qubit at `position`, which must be |0>. (The reference
+    /// for [`retired`](Self::retired), with `project` and `apply`.)
+    #[cfg(test)]
     pub fn shrink(&mut self, position: usize) {
         let half = self.amps.len() / 2;
         let low = (1usize << position) - 1;
@@ -90,6 +125,7 @@ impl Dense {
 
     /// Run `f(i, j)` for every pair `i < j = i ^ x` (every index once when
     /// `x == 0`, with `j == i`), in parallel for large states.
+    #[cfg(test)]
     fn for_pairs(&mut self, x: u64, f: impl Fn(usize, usize, *mut C64) + Sync) {
         let len = self.amps.len();
         let ptr = Shared(self.amps.as_mut_ptr());
@@ -113,44 +149,95 @@ impl Dense {
         }
     }
 
+    /// Run `f(i)` for every index `i` with bit `j` clear (every index when
+    /// `j` is `None`), in parallel for large states. The loops below visit
+    /// only the indices they write, rather than testing every index, and
+    /// write the coefficient of `P` as a phase times a sign
+    /// ([`Pauli::phase`], [`Pauli::sign`]), without branches: the near-Clifford
+    /// backend spends most of its time on noisy circuits in them.
+    fn for_half(&mut self, j: Option<u32>, f: impl Fn(usize, *mut C64) + Sync) {
+        let ptr = Shared(self.amps.as_mut_ptr());
+        let (count, low) = match j {
+            Some(j) => (self.amps.len() / 2, (1usize << j) - 1),
+            None => (self.amps.len(), usize::MAX),
+        };
+        let run = |k: usize| f((k & low) | ((k & !low) << 1), ptr.get());
+        if count >= PARALLEL / 2 {
+            (0..count)
+                .into_par_iter()
+                .with_min_len(PARALLEL / 8)
+                .for_each(run);
+        } else {
+            (0..count).for_each(run);
+        }
+    }
+
     /// `exp(-i θ/2 P)`.
     pub fn rotate(&mut self, p: Pauli, theta: f64) {
         let (c, s) = ((theta / 2.0).cos(), (theta / 2.0).sin());
-        let minus_i_sin = C64::new(0.0, -s);
+        // exp(-iθ/2 P)|i> = c |i> - i s phase sign(i) |i ^ x>.
+        let m = C64::new(0.0, -s) * p.phase();
         if p.x == 0 {
-            self.for_pairs(0, |i, _, amps| {
+            let (plus, minus) = (C64::new(c, 0.0) + m, C64::new(c, 0.0) - m);
+            self.for_half(None, |i, amps| {
+                let factor = if p.sign(i) > 0.0 { plus } else { minus };
                 // SAFETY: each index is visited once.
-                unsafe { *amps.add(i) *= C64::new(c, 0.0) + minus_i_sin * p.coefficient(i) };
+                unsafe { *amps.add(i) *= factor };
             });
             return;
         }
-        self.for_pairs(p.x, |i, j, amps| {
-            // SAFETY: the pairs (i, j) are disjoint.
+        let x = p.x as usize;
+        // sign(i ^ x) = sign(i) sign(x).
+        let mx = m * p.sign(x);
+        self.for_half(Some(p.x.trailing_zeros()), |i, amps| {
+            let j = i ^ x;
+            let s = p.sign(i);
+            // SAFETY: the pairs (i, i ^ x) are disjoint.
             unsafe {
                 let (a, b) = (*amps.add(i), *amps.add(j));
-                *amps.add(i) = a * c + minus_i_sin * p.coefficient(j) * b;
-                *amps.add(j) = b * c + minus_i_sin * p.coefficient(i) * a;
+                *amps.add(i) = a * c + mx * s * b;
+                *amps.add(j) = b * c + m * s * a;
             }
         });
     }
 
-    /// `<φ|P|φ>` (real for a Hermitian `P`).
+    /// `<φ|P|φ>` (real for a Hermitian `P`): the phase times the sum of
+    /// `sign(i) conj(φ(i ^ x)) φ(i)`. Over a pair `i, i ^ x` with
+    /// `sign(i ^ x) = σ sign(i)` (`σ = sign(x)`), the two terms add up to
+    /// `sign(i) (conj(b) a + σ conj(a) b)` with `a = φ(i)`, `b = φ(i ^ x)`:
+    /// `2 sign(i) Re(conj(b) a)` for `σ = 1`, and `2i sign(i) Im(conj(b) a)`
+    /// for `σ = -1`, so the sum is of reals.
     pub fn expectation(&self, p: Pauli) -> f64 {
-        let term =
-            |i: usize| (self.amps[i ^ p.x as usize].conj() * p.coefficient(i) * self.amps[i]).re;
-        if self.amps.len() >= PARALLEL {
-            (0..self.amps.len())
-                .into_par_iter()
-                .with_min_len(PARALLEL / 4)
-                .map(term)
-                .sum()
+        let amps = &self.amps;
+        if p.x == 0 {
+            let sum = sum(amps.len(), |i| p.sign(i) * amps[i].norm_sqr());
+            return p.phase().re * sum;
+        }
+        let x = p.x as usize;
+        let low = (1usize << p.x.trailing_zeros()) - 1;
+        let pair = |k: usize| {
+            let i = (k & low) | ((k & !low) << 1);
+            (i, amps[i], amps[i ^ x])
+        };
+        if p.sign(x) > 0.0 {
+            let sum = sum(amps.len() / 2, |k| {
+                let (i, a, b) = pair(k);
+                p.sign(i) * (a.re * b.re + a.im * b.im)
+            });
+            2.0 * p.phase().re * sum
         } else {
-            (0..self.amps.len()).map(term).sum()
+            let sum = sum(amps.len() / 2, |k| {
+                let (i, a, b) = pair(k);
+                p.sign(i) * (a.im * b.re - a.re * b.im)
+            });
+            // Re(phase * 2i sum) = -2 Im(phase) sum.
+            -2.0 * p.phase().im * sum
         }
     }
 
     /// Project onto the `eigenvalue` (`±1`) eigenspace of `P` and
     /// renormalise, given that eigenspace's probability.
+    #[cfg(test)]
     pub fn project(&mut self, p: Pauli, eigenvalue: f64, probability: f64) {
         let scale = 0.5 / probability.sqrt();
         self.for_pairs(p.x, |i, j, amps| {
@@ -168,7 +255,75 @@ impl Dense {
         });
     }
 
+    /// The state after measuring `p` with `eigenvalue` (`±1`, of nonzero
+    /// `probability`) and retiring the measured qubit, in one pass: what
+    /// [`project`](Self::project), the gates of the parent module's
+    /// `retire_plan(p)` (applied as `G†`), an X on its target when `one`
+    /// (the target then reads 1) and [`shrink`](Self::shrink) of the target
+    /// give, without writing the full-size state in between.
+    ///
+    /// Why one gather is enough. Let `j` be the plan's target, and `a0` an
+    /// index with bit `j` clear.
+    /// - If `p` has an X part, `j` is its lowest X position. Every gate of
+    ///   the plan before its last (an H on `j`) is S or S† on `j`, or a CX
+    ///   or CZ controlled by `j`, so it fixes `|a0>`, and they take the
+    ///   projected state `v` to an X eigenstate on `j` with `v(a0)`
+    ///   unchanged. The H then puts `√2 v(a0)` at `a0` (eigenvalue +1) or
+    ///   at `a0 | 1 << j` (-1, which the X moves back). With
+    ///   `v(i) = (φ(i) + λ (Pφ)(i)) / (2 √prob)` and `(Pφ)(i) = c(i ^ x)
+    ///   φ(i ^ x)`, the new amplitude at `a` (`a0` without bit `j`) is
+    ///   `(φ(a0) + λ c(a0 ^ x) φ(a0 ^ x)) / √(2 prob)`.
+    /// - If `p` is Z-type, `j` is its lowest Z position, and the plan is CX
+    ///   gates from the other Z positions onto `j`, which leave bit `j`
+    ///   equal to the parity of `z & i`, which is `one` on the projected
+    ///   state. So the new amplitude is `φ(b) / √prob`, where `b` is `a0`
+    ///   with bit `j` set to `one ^ parity(z & a0)`.
+    ///
+    /// The plan's other gates and the X are still prepended to the frame;
+    /// this replaces only their work on the dense state, which was up to
+    /// two passes per gate.
+    ///
+    /// The new state is written into `buffer` (cleared first), so that a
+    /// caller can reuse one allocation: a fresh one per measurement costs
+    /// page faults once the states are larger than the allocator's
+    /// threshold for mapping memory (128 KB, 13 active qubits).
+    pub fn retired(
+        &self,
+        p: Pauli,
+        eigenvalue: f64,
+        probability: f64,
+        one: bool,
+        mut buffer: Vec<C64>,
+    ) -> Dense {
+        let half = self.amps.len() / 2;
+        let amps = &self.amps;
+        buffer.clear();
+        if p.x != 0 {
+            let j = p.x.trailing_zeros();
+            let low = (1usize << j) - 1;
+            let scale = (0.5 / probability).sqrt();
+            let m = p.phase() * eigenvalue;
+            let x = p.x as usize;
+            gather(&mut buffer, half, |a: usize| {
+                let a0 = (a & low) | ((a & !low) << 1);
+                (amps[a0] + m * p.sign(a0 ^ x) * amps[a0 ^ x]) * scale
+            })
+        } else {
+            let j = p.z.trailing_zeros();
+            let low = (1usize << j) - 1;
+            let scale = 1.0 / probability.sqrt();
+            let z = p.z as usize;
+            gather(&mut buffer, half, |a: usize| {
+                let a0 = (a & low) | ((a & !low) << 1);
+                let bit = one as usize ^ ((z & a0).count_ones() as usize & 1);
+                amps[a0 | bit << j] * scale
+            })
+        }
+        Dense { amps: buffer }
+    }
+
     /// Apply a one- or two-position Clifford.
+    #[cfg(test)]
     pub fn apply(&mut self, gate: Gate) {
         let bit = |p: usize| 1usize << p;
         match gate {
@@ -208,6 +363,7 @@ impl Dense {
 }
 
 /// Cliffords applied to the dense state, on positions.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Gate {
     H(usize),
@@ -268,6 +424,60 @@ mod tests {
         assert!((state.expectation(p) + 1.0).abs() < 1e-12);
         let norm: f64 = state.amps.iter().map(|a| a.norm_sqr()).sum();
         assert!((norm - 1.0).abs() < 1e-12);
+    }
+
+    /// `retired` against what it replaces: the projection, the plan's gates
+    /// one by one (as `G†`), the X for a target reading 1, and the shrink;
+    /// for every Pauli on 4 positions, both eigenvalues, on random states.
+    #[test]
+    fn retiring_in_one_pass_matches_the_gates_one_by_one() {
+        use crate::stabilizer::Clifford;
+        let dagger = |g: Clifford| match g {
+            Clifford::H(p) => Gate::H(p),
+            Clifford::S(p) => Gate::Phase(p, C64::new(0.0, -1.0)),
+            Clifford::Sdg(p) => Gate::Phase(p, C64::new(0.0, 1.0)),
+            Clifford::X(p) => Gate::X(p),
+            Clifford::CX(c, t) => Gate::CX(c, t),
+            Clifford::CZ(a, b) => Gate::CZ(a, b),
+            other => unreachable!("{other:?}"),
+        };
+        let mut checked = 0;
+        for x in 0..16u64 {
+            for z in 0..16u64 {
+                for negative in [false, true] {
+                    let p = Pauli { x, z, negative };
+                    if p.is_identity() {
+                        continue;
+                    }
+                    let state = random_state(4, x * 37 + z * 3 + negative as u64);
+                    let e = state.expectation(p);
+                    for eigenvalue in [1.0, -1.0] {
+                        let probability = (1.0 + eigenvalue * e) / 2.0;
+                        let (gates, target, plan_negative) = super::super::retire_plan(p);
+                        let one = (eigenvalue < 0.0) ^ plan_negative;
+                        let mut reference = state.clone();
+                        reference.project(p, eigenvalue, probability);
+                        for &g in &gates {
+                            reference.apply(dagger(g));
+                        }
+                        if one {
+                            reference.apply(Gate::X(target));
+                        }
+                        // The target reads 0 before it is removed.
+                        for (i, a) in reference.amps.iter().enumerate() {
+                            assert!(i >> target & 1 == 0 || a.norm() < 1e-12);
+                        }
+                        reference.shrink(target);
+                        let fused = state.retired(p, eigenvalue, probability, one, Vec::new());
+                        for (a, b) in fused.amps.iter().zip(&reference.amps) {
+                            assert!((a - b).norm() < 1e-12, "{p:?} {eigenvalue}");
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 2 * 2 * 255);
     }
 
     #[test]

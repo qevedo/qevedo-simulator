@@ -37,8 +37,9 @@ the same circuits. Circuits with few non-Clifford gates run on a
 near-Clifford backend (a Clifford frame around a small dense state, after
 Clifft): a 200-qubit Clifford+T circuit with 20 T gates samples 1000 shots in
 0.11 s, where every Qiskit Aer method either takes over 10 minutes or
-does not support it. It samples Pauli noise as well, exactly, though
-3.4–17.8× slower than Clifft on noisy circuits (details below). Expectation values of circuits far beyond any state
+does not support it. It samples Pauli noise as well, exactly; Clifft is
+still 1.8–4.9× faster on most noisy circuits, and Qevedo 1.2× faster on the
+largest (details below). Expectation values of circuits far beyond any state
 vector come from Pauli propagation: `<Z62>` of IBM's 127-qubit, 20-step
 kicked Ising "utility" circuit in 0.25–9.6 s, with the same result as IBM's
 pauli-prop and 14.6–117× faster than it end to end (5.0–15.7× faster than
@@ -384,29 +385,36 @@ with uniform depolarizing noise of strength p, the same circuit in both,
 
 | Circuit | p | Peak active qubits | Qevedo, 4 threads | Clifft, 4 threads | Qevedo, 1 thread | Clifft, 1 thread |
 |---|---|---|---|---|---|---|
-| 24 qubits, depth 20, 10 T | 0.001 | 10 | 0.043 s | **0.013 s** | 0.155 s | **0.035 s** |
-| 60 qubits, depth 20, 12 T | 0.001 | 12 | 0.275 s | **0.053 s** | 1.03 s | **0.140 s** |
-| 100 qubits, depth 30, 14 T | 0.001 | 14 | 1.98 s | **0.167 s** | 6.92 s | **0.390 s** |
-| 200 qubits, depth 40, 12 T | 0.001 | 12 | 1.25 s | **0.821 s** | 4.66 s | **0.912 s** |
-| 60 qubits, depth 20, 12 T | 0.01 | 12 | 0.627 s | **0.062 s** | 2.48 s | **0.166 s** |
+| 24 qubits, depth 20, 10 T | 0.001 | 10 | 0.026 s | **0.012 s** | 0.069 s | **0.030 s** |
+| 60 qubits, depth 20, 12 T | 0.001 | 12 | 0.115 s | **0.063 s** | 0.327 s | **0.130 s** |
+| 100 qubits, depth 30, 14 T | 0.001 | 14 | 0.651 s | **0.200 s** | 1.66 s | **0.338 s** |
+| 200 qubits, depth 40, 12 T | 0.001 | 12 | **0.643 s** | 0.789 s | 2.33 s | **0.923 s** |
+| 60 qubits, depth 20, 12 T | 0.01 | 12 | 0.261 s | **0.076 s** | 0.679 s | **0.159 s** |
 
-Clifft is faster on every case: by 3.4–17.8×, and at 200 qubits by 1.5× on
-4 threads and 5.1× on one. Without errors the two are close (the 100-qubit
-circuit: 0.33 s against Clifft's 0.23 s on one thread), but Qevedo's time grows
-with the number of shots that errors split off (6.73 s at p = 0.001)
-while Clifft's stays at 0.33–0.35 s: each split-off shot carries its own
-copy of the dense state and its own frame words through every operation,
-where Clifft runs one shot at a time through a precompiled program.
-Closing that gap is the next step.
+Clifft is faster on all but one case, by 1.8–4.9×; at 200 qubits Qevedo is
+1.23× faster on 4 threads (Clifft 2.5× faster on one). Since 0.1.9 Qevedo
+compiles the shared frame's work once into a program and runs one group of
+shots at a time through it, as Clifft runs one shot at a time; that made
+these cases 1.7–4.1× faster than 0.1.8
+(`benchmarks/compare_noisy_builds.py`,
+`results/noisy_nearclifford_before_after.csv`). On one thread, the 100-qubit
+circuit takes 0.22 s against Clifft's 0.21 s without errors and 0.30 s
+against 0.35 s at p = 10⁻⁵, where most shots share a dense state; Clifft
+pulls ahead as errors split more shots off (0.56 s against 0.35 s at
+10⁻⁴, 1.65 s against 0.36 s at 10⁻³). Its compiled program runs on
+AVX-512 kernels here and keeps one sign register per rotation and
+measurement per shot, where Qevedo's dense kernels are scalar and each
+shot's frame is words over all virtual qubits.
 
 The results agree. 200,000 shots each: the whole distributions of three
 6- and 8-qubit circuits pass a chi-square test of homogeneity (p-values
-0.385, 0.893, 0.861), and on 24 and 60 qubits every qubit's rate of
-reading 1 agrees (largest |z| 1.79 and 3.33 over 24 and 60 qubits, mean z²
-0.84 and 0.93). The tests check sampled distributions against exact ones
-summed over every combination of errors. Noiseless circuits are not
-affected: their counts are identical to those of 0.1.5 and 0.1.6 for the
-same seed.
+0.506, 0.999, 0.287), and on 24 and 60 qubits every qubit's rate of
+reading 1 agrees (largest |z| 1.67 and 2.30 over 24 and 60 qubits, mean z²
+0.70 and 0.98). The tests check sampled distributions against exact ones
+summed over every combination of errors. Noiseless circuits keep the
+counts of 0.1.5 to 0.1.8 for the same seed (checked against the 0.1.8
+wheel), and run faster: the 100-qubit, 24-T example of
+`compare_examples.py` took 0.41 s against 1.86 s.
 
 ### Expectation values (Pauli propagation)
 

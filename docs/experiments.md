@@ -17,14 +17,16 @@ noisy runs use p = 0.001 and 10,000 shots unless stated.
 
 In priority order. Replace this list at the end of each run.
 
-1. **Noisy near-Clifford speed.** Clifft is 3.4–17.8× faster once errors split shots off (2026-11-06). The plan: a per-shot path that runs split-off shots one at a time through operations precompiled once per batch (pulled-back Paulis, retire plans, error images), keeping only `φ` and `P_s` per shot, as Clifft does. Then sample each group's final measurements in one pass over its `φ`.
-2. **Stim's format on the near-Clifford backend.** Read `T`, `T_DAG` and Clifft's rotation gates and return detection events, so magic-state cultivation circuits run directly.
-3. **Stim reader and writer gaps.** `MXX`/`MYY`/`MZZ`, `SPP` and heralded errors in the reader; `to_stim` writing detectors and observables.
-4. **Detection events without keeping every measurement record.** At d = 101 the 1.3 GB record is as large as the output.
-5. **Qiskit layer** (added 2026-11-06): Aer noise models (at least Pauli errors on Clifford circuits, into the simulator's channels); classical control flow (`if_test`) on the backends that already measure mid-circuit; Cirq and PennyLane devices.
-6. **Pauli propagation.** A compact string store (sorted arrays or packed open addressing instead of hash maps of full strings), to reach converged 20-step utility values in less memory; then weight truncation and noise (Angrisani et al., arXiv:2501.13101).
-7. **A backend selector calibrated on the running machine.**
-8. **Skip straight from one error to the next across blocks of frame words** (stabilizer noise). At d = 101 the countdown walks 1.1e9 steps for 7.2e7 errors (2026-10-28).
+1. **Noisy near-Clifford: sign registers instead of frame words.** After 0.1.9 Clifft is still 1.8–4.9× faster on 9 of 10 cases. A split-off shot conjugates frame words over all virtual qubits at every gathering and collapse (frame measurements + conjugation ≈ 25% of the time at 100 qubits, p = 1e-3). Precompute, per noise site, which later rotations and measurements each error flips (Clifft's expression registers), so per shot the frame work is O(errors). The outcome-driven X insertions (frame and dense measurements, resets) become precomputed vectors too.
+2. **SIMD dense kernels** (`dense.rs`: `rotate`, `expectation`, `retired`; they are scalar, Clifft's are AVX-512), and keep the outcome probability in the `Task` so a group split at a dense measurement does not recompute the expectation.
+3. **Stim's format on the near-Clifford backend.** Read `T`, `T_DAG` and Clifft's rotation gates and return detection events, so magic-state cultivation circuits run directly.
+4. **Rerun `compare_nearclifford.py`** (noiseless near-Clifford against Aer): the recorded `nearclifford.csv` predates 0.1.9, which made the 100-qubit 24-T example 4.6× faster.
+5. **Stim reader and writer gaps.** `MXX`/`MYY`/`MZZ`, `SPP` and heralded errors in the reader; `to_stim` writing detectors and observables.
+6. **Detection events without keeping every measurement record.** At d = 101 the 1.3 GB record is as large as the output.
+7. **Qiskit layer**: Aer noise models (at least Pauli errors on Clifford circuits, into the simulator's channels); classical control flow (`if_test`) on the backends that already measure mid-circuit; Cirq and PennyLane devices.
+8. **Pauli propagation.** A compact string store (sorted arrays or packed open addressing instead of hash maps of full strings), to reach converged 20-step utility values in less memory; then weight truncation and noise (Angrisani et al., arXiv:2501.13101).
+9. **A backend selector calibrated on the running machine.**
+10. **Skip straight from one error to the next across blocks of frame words** (stabilizer noise). At d = 101 the countdown walks 1.1e9 steps for 7.2e7 errors (2026-10-28).
 
 ## Worked
 
@@ -32,6 +34,7 @@ Newest first. Details are in `improvement-log.md` under the same date.
 
 | Date | Version | Change | Effect |
 |---|---|---|---|
+| 2026-11-08 | 0.1.9 | Noisy near-Clifford compiled once into a program for the groups, run one group at a time depth first (`noisy.rs`); consecutive noise channels of one probability as one run of sites; dense measurement as one gather into the half-size state (`Dense::retired`, all dense measurements) | Noisy cases 1.7–4.1× faster than 0.1.8; against Clifft 1.8–4.9× slower (was 3.4–17.8×), 1.23× faster at 200 qubits on 4 threads; noiseless near-Clifford example 4.6× faster, same counts |
 | 2026-11-06 | 0.1.8 | Pauli noise on the near-Clifford backend (`nearclifford/noisy.rs`): one shared Clifford frame per batch, a Pauli frame per shot, a dense state per group (as Clifft, Chase & Labib, arXiv:2604.27058). 0.1.7 never published: CI's newer clippy rejected `drain(..).collect()`; fixed in 0.1.8 | Noisy Clifford+T circuits run, with exact statistics (χ² p = 0.385 / 0.893 / 0.861 at 200k shots). Within 1.3–1.4× of Clifft without errors, 3.4–17.8× slower with them; noiseless path unchanged |
 | 2026-11-06 | 0.1.6 | Qiskit backend and primitives (`qevedo.simulator.qiskit`: QevedoSimulator, QevedoSampler, QevedoEstimator), from an interactive session | 6.6–32× faster than Aer through `backend.run` on QV 20–28; estimator 5.5–30× faster |
 | 2026-11-04 | 0.1.5 | Stim reader: `MPP` (basis rotations plus a CX ladder), `PAULI_CHANNEL_2`, correlated `E`/`ELSE_CORRELATED_ERROR` | Toric code L = 10/20/30: 0.021/0.162/0.787 s against Stim's 0.083/1.116/4.310 s (4.0–6.9×) |
@@ -64,6 +67,11 @@ what new fact would justify another attempt.
   - swapping back the old terminal sampler (equally slow).
 
 **Near-Clifford noise (`nearclifford/noisy.rs`)**
+- **All groups in lockstep, one operation at a time** (0.1.8, replaced 2026-11-08). Once errors split most shots off, every operation streamed all groups' dense parts through memory (439 groups × 2^14 amplitudes, 112 MB per 640-shot batch): 4–10 ns per amplitude. Run groups depth first through a compiled program instead.
+- **Branch-free dense kernels alone** (2026-11-08): visiting only written indices, coefficient as phase × parity sign. On the lockstep path, 4.3 → 3.8 s (within noise) because the loops waited on memory. Kept, but only worth it once states stay in cache.
+- **`&dyn Fn` element callbacks to share the serial and parallel kernel loops** (2026-11-08): slower than the original (p = 1e-4 case 0.76 → 1.2 s). Use generic helpers.
+- **A fresh `Vec` per dense measurement** (2026-11-08): above 128 KB glibc maps fresh pages, page faults every time. Reuse one buffer per batch.
+- **Dead end: sampling all final measurements of a group from one transformed state** (2026-11-08, Next of 0.1.8). Considered in detail: a measurement tree costs ~k/2 shots' worth of dense work, and applying the whole Clifford at full size costs more passes than the sequential halving. With 1–2 shots per group at p = 1e-3 neither helps; the one-pass retirement does. Retry if groups stay large (low noise, many shots) and the final dense measurements dominate.
 - **A copy of the Clifford frame per group** (2026-11-06). 2.8× slower at 200 qubits, though 14–40% faster at 60–100; summed on one thread 22.7 s against 15.2 s for the shared frame.
 - **Pre-trajectory sampling for state-vector, MPS and near-Clifford** (2026-10-28, Patti et al. arXiv:2504.16297): simulate each distinct error pattern once for all shots that drew it. Fully implemented, and it passed exact-distribution tests on every backend, but it was **lost**: that run couldn't push (HTTP 403). It is not rejected; it was replaced by frames on near-Clifford (0.1.8), and the other backends reject noise. Retry if noise is wanted on the state vector or MPS.
 
@@ -92,12 +100,18 @@ what new fact would justify another attempt.
 
 ## Considered, not tried
 
+- **Clifft's MEASURE_ACTIVE pivot kernels and expression registers** (read from `clifft.compile(...).inspect()` on the 100-qubit benchmark circuit, 2026-11-08: 113 actions, peak width 13, noise kept apart as `noise_site_probabilities`, every rotation and record carrying a sign register `e_i`). The registers are Next item 1; the one-pass retirement here covers the pivot kernel's job.
+
 - **Faster detector sampling than reference-plus-frames.** Searched three times (2026-10-31, 2026-11-02, 2026-11-04): GPU stabilizer simulators, STABSim (arXiv:2507.03092), SymPhase, QuaSARQ (arXiv:2603.14641), Sdim (arXiv:2511.12777). Nothing beats the current approach on CPUs.
 - **Propagating each error straight to the detectors it flips** (2026-10-31). Described in Stim's paper but not implemented there, and not tried here. A possible lead for many-shot, low-noise runs.
 - **PauliPropagation.jl comparison** (2026-10-28): not installed.
 - **Repeated passes over:** the compact Pauli-propagation store and the calibrated selector (in **Next**); `MPP` and near-Clifford noise (both since done). They were passed over because they "improve features that fewer people use".
 
 ## Method lessons
+
+- **Profiling without perf** (2026-11-08): no `perf` on the VM. Temporary `Instant` timers per operation kind in the hot loop (and a count of amplitudes touched) found the bottleneck within minutes; per-amplitude ns from those counts told memory-bound from compute-bound. Remove them before committing.
+- **Python environments** (2026-11-08): `/usr/local/bin/pip` belongs to Python 3.13 while `python3` is 3.11, and Clifft needs ≥ 3.12. Make one `python3.13 -m venv` per build (before / after) and install each wheel there; `compare_noisy_builds.py` takes the two interpreters.
+- **Comparing counts across builds:** Python's `hash()` of a string is salted per process; use `hashlib`.
 
 - **Timing on the VM.**
   - Builds drift ±8–10% between batches and 3-repeat runs move ±15%.

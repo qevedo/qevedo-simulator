@@ -52,11 +52,11 @@ use rand::{Rng, RngExt, SeedableRng};
 use rand_pcg::Pcg64;
 
 use crate::circuit::{Circuit, Gate, Instruction};
-use crate::matrix::{C64, Matrix};
+use crate::matrix::Matrix;
 use crate::simulator::{RunResult, bitstring};
 use crate::stabilizer::{Clifford, Tableau, lower};
 
-use dense::{Dense, Gate as DenseGate, Pauli};
+use dense::{Dense, Pauli};
 
 /// A step of a lowered gate.
 #[derive(Clone, Debug, PartialEq)]
@@ -451,16 +451,16 @@ impl NearClifford {
             return;
         }
         let eigenvalue = if outcome { -1.0 } else { 1.0 };
-        if !self.symbolic {
+        let probability = (!self.symbolic).then(|| {
             let one = match self.cached.take() {
                 Some((cached, one)) if cached == q => one,
                 _ => ((1.0 - self.dense.expectation(p)) / 2.0).clamp(0.0, 1.0),
             };
             let probability = if outcome { one } else { 1.0 - one };
             assert!(probability > 0.0, "collapsing onto an impossible outcome");
-            self.dense_mut().project(p, eigenvalue, probability);
-        }
-        self.retire(p, eigenvalue);
+            probability
+        });
+        self.retire(p, eigenvalue, probability);
     }
 
     /// The dense part, copied first if another state shares it.
@@ -505,53 +505,41 @@ impl NearClifford {
         }
     }
 
-    /// After `φ` became an eigenstate of `p` (with `eigenvalue`), turn `p`
-    /// into Z on one position with Cliffords on the active qubits (applied
-    /// to `φ` and prepended to the frame), and retire that qubit.
-    fn retire(&mut self, p: Pauli, eigenvalue: f64) {
+    /// Project `φ` onto the `eigenvalue` eigenspace of `p` (of nonzero
+    /// `probability`, `None` when symbolic), turn `p` into Z on one position
+    /// with Cliffords `G` on the active qubits (`φ -> G† φ`, `C -> C G`, so
+    /// the state is unchanged), and retire that qubit. The frame takes the
+    /// Cliffords one by one; the dense part takes the projection, the
+    /// Cliffords and the removal of the qubit in one pass
+    /// ([`Dense::retired`]).
+    fn retire(&mut self, p: Pauli, eigenvalue: f64, probability: Option<f64>) {
         let (gates, target, negative) = retire_plan(p);
-        for &g in &gates {
-            self.apply_virtual(g);
-        }
-        // φ is now an eigenstate of ±Z_target.
+        // φ is then an eigenstate of ±Z_target; X makes it +1.
         let one = (eigenvalue < 0.0) ^ negative;
-        if one {
-            self.apply_virtual(Clifford::X(target));
+        for g in gates.into_iter().chain(one.then_some(Clifford::X(target))) {
+            self.prepend(self.virtual_gate(g));
         }
-        if !self.symbolic {
-            self.dense_mut().shrink(target);
+        if let Some(probability) = probability {
+            self.dense = Arc::new(
+                self.dense
+                    .retired(p, eigenvalue, probability, one, Vec::new()),
+            );
         }
         self.active.remove(target);
         debug_assert!(self.symbolic || self.dense.qubits() == self.active.len());
     }
 
-    /// Apply a Clifford `G` on positions as `φ -> G† φ`, `C -> C G`: the
-    /// state is unchanged.
-    fn apply_virtual(&mut self, g: Clifford) {
-        let (dense, frame) = self.virtual_pair(g);
-        if !self.symbolic {
-            self.dense_mut().apply(dense);
-        }
-        self.prepend(frame);
-    }
-
-    /// For a Clifford `G` on positions: `G†` as a dense gate, and `G` on the
-    /// virtual qubits at those positions.
-    fn virtual_pair(&self, g: Clifford) -> (DenseGate, Clifford) {
+    /// A Clifford on positions as the same Clifford on the virtual qubits at
+    /// those positions.
+    fn virtual_gate(&self, g: Clifford) -> Clifford {
         let virt = |p: usize| self.active[p];
         match g {
-            Clifford::H(p) => (DenseGate::H(p), Clifford::H(virt(p))),
-            Clifford::S(p) => (
-                DenseGate::Phase(p, C64::new(0.0, -1.0)),
-                Clifford::S(virt(p)),
-            ),
-            Clifford::Sdg(p) => (
-                DenseGate::Phase(p, C64::new(0.0, 1.0)),
-                Clifford::Sdg(virt(p)),
-            ),
-            Clifford::X(p) => (DenseGate::X(p), Clifford::X(virt(p))),
-            Clifford::CX(c, t) => (DenseGate::CX(c, t), Clifford::CX(virt(c), virt(t))),
-            Clifford::CZ(a, b) => (DenseGate::CZ(a, b), Clifford::CZ(virt(a), virt(b))),
+            Clifford::H(p) => Clifford::H(virt(p)),
+            Clifford::S(p) => Clifford::S(virt(p)),
+            Clifford::Sdg(p) => Clifford::Sdg(virt(p)),
+            Clifford::X(p) => Clifford::X(virt(p)),
+            Clifford::CX(c, t) => Clifford::CX(virt(c), virt(t)),
+            Clifford::CZ(a, b) => Clifford::CZ(virt(a), virt(b)),
             other => unreachable!("{other:?} is not used on positions"),
         }
     }
@@ -1210,13 +1198,11 @@ pub fn run(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<RunResu
     let leaves = if shots == 0 {
         Vec::new()
     } else if circuit.has_noise() {
-        let peak = peak_active_qubits(circuit).expect("checked by is_supported");
         noisy::sample(
             &base,
             &instructions[first..],
             shots,
             circuit.num_clbits,
-            peak,
             rng.random(),
         )?
     } else {

@@ -7,6 +7,111 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-08 — Noisy near-Clifford: one group at a time through a compiled program (0.1.9)
+
+**What.**
+- `nearclifford/noisy.rs` is rewritten. `compile` walks the rest of the
+  circuit once with a symbolic state, since nothing that happens to the
+  shared frame `C` depends on a shot, and writes a program of steps on the
+  shots' Pauli frames and dense parts only: Cliffords to conjugate the
+  frames, rotations (Pauli on positions, angle, the virtual Pauli whose
+  anticommutation flips the sign), fixed / 50-50 / dense measurements
+  with their collapse or retire Cliffords, resets, and noise runs with the
+  images `C† X_q C`, `C† Z_q C` of every site. `run` takes one group at a
+  time through the whole program, depth first; a split pushes the other
+  part on a stack with its decision (sign or outcome) already made. The
+  Clifford work is now done once per run, not once per batch.
+- Consecutive noise channels of the same probability form one run of
+  sites, and a shot draws one geometric gap per error across the run (the
+  benchmark circuits have a channel after every gate: about 6,000 per
+  circuit, mostly between Clifford gates, which the program does not
+  contain).
+- `Dense::retired`: the projection of a dense measurement, the Cliffords
+  that turn the measured Pauli into Z on one position (applied as `G†`),
+  the X for a qubit reading 1 and the removal of that qubit, as one gather
+  into the half-size state. Every gate of `retire_plan` before its last H
+  fixes the indices with the target bit clear, so the new amplitude is
+  `(φ(a0) + λ c(a0 ^ x) φ(a0 ^ x)) / √(2 prob)` (Z-type: one amplitude of
+  `φ` over `√prob`). Used by the noisy path, by `NearClifford::collapse`
+  (the noiseless measurement tree and final-measurement frames) and so by
+  every dense measurement. The frame still takes the plan's Cliffords one
+  by one. The old `project`, `apply`, `shrink` are kept as the test-only
+  reference.
+- `rotate` and `expectation` visit only the indices they write (inserting
+  the pair bit), and write the Pauli's coefficient as a fixed phase times
+  `(-1)^{|z & i|}`, with `sign(i ^ x) = sign(i) sign(x)`, so the
+  expectation is a sum of real products.
+- Tests: `retiring_in_one_pass_matches_the_gates_one_by_one` (every
+  Pauli on 4 positions, both eigenvalues, against project + gates + X +
+  shrink); `noise_after_every_gate_matches_the_exact_distribution`
+  (channels of one probability after every gate, of five kinds, so runs
+  of sites, against the exact distribution; replacing the site lookup by
+  the first site makes it fail at once).
+- `benchmarks/compare_noisy_builds.py`: the noisy cases of two builds,
+  interleaved, from two Python environments.
+
+**Why.** Item 1 of Next. Profiling the 0.1.8 path (100 qubits, 14 T,
+p = 10⁻³, one thread, timers per operation kind) showed 80% of the time in
+measurements, almost all of it the final dense measurements: per group, an
+expectation pass, a projection pass, up to two passes per Clifford of the
+retire plan and a shrink. After fusing those, the remaining dense work
+still ran at 4-10 ns per amplitude: lockstep execution streamed every
+group's dense part (439 groups of 2^14 amplitudes per 640-shot batch,
+112 MB) through memory for every operation. Run one group at a time, a
+256 KB state stays in cache. This is Clifft's per-shot execution (Chase &
+Labib, arXiv:2604.27058), kept with Qevedo's sharing of `φ` between shots
+that no error has told apart.
+
+**Measured** (4-vCPU Xeon VM).
+- Before and after, 5 interleaved rounds (`results/noisy_nearclifford_before_after.csv`):
+  every noisy case 1.7-4.1× faster (after/before best-of 0.250-0.587).
+  100 qubits, p = 10⁻³: 6.20 → 1.55 s on one thread, 1.66 → 0.43 s on 4;
+  200 qubits: 4.24 → 2.25 s and 1.12 → 0.63 s; without errors 0.31 → 0.22 s.
+- Against Clifft 0.13 (`results/noisy_nearclifford.csv`): Clifft is
+  still faster on 9 of 10 cases, by 1.8-4.9× (was 3.4-17.8×); at 200
+  qubits on 4 threads Qevedo is 1.23× faster (0.643 s against 0.789 s).
+  Sweep, 100 qubits, one thread: 0.217 / 0.304 / 0.565 / 1.651 s at p = 0,
+  10⁻⁵, 10⁻⁴, 10⁻³ against Clifft's 0.213 / 0.354 / 0.347 / 0.357 s.
+- Agreement with Clifft, 200,000 shots: chi-square p = 0.506, 0.999,
+  0.287; per-qubit max |z| 1.67 and 2.30 on 24 and 60 qubits. Mean z² on
+  the 6-qubit and 8-qubit p = 0.05 circuits was 1.78 and 2.11 (it was
+  1.64 for the latter in 0.1.8, against the same Clifft sample), so both
+  were rerun at 10⁶ shots with three seeds each on both sides: mean z²
+  0.76 / 2.19 / 0.71 and 0.73 / 0.83 / 1.88, chi-square p 0.398 / 0.520 /
+  0.391 and 0.460 / 0.286 / 0.021: consistent with agreement (one of six
+  p-values below 0.05), and the exact-distribution tests pass.
+- Noiseless: the same counts as the 0.1.8 wheel for the same seed (four
+  random Clifford+T circuits, 5000 shots each, identical digests). The
+  `nearclifford` example (100 qubits, 24 T, 1000 shots) took 0.41 s against
+  1.86 s (`compare_examples.py`, 9 rounds, median ratio 0.224). All other
+  example medians are at most 1.030 (statevector QFT 26 f32, code this
+  change does not touch); rerun with 25 rounds, the four above 1.02 are at
+  most 1.023 (`results/examples_before_after*.csv`).
+
+**Learned.**
+- Fusing the measurement alone halved the time (8.5 → 4.3 s per run of the
+  profiling circuit, the 100-qubit case built in a temporary Rust example,
+  not kept); making the kernels branch-free on top of it did
+  nothing measurable (3.8 s): the loops were waiting on memory, not
+  arithmetic. Only after the depth-first rewrite did per-element work
+  matter again.
+- A `&dyn Fn` per element in the kernels (to share the parallel and serial
+  loops) made them slower than before; generic helpers fixed it.
+- A fresh `Vec` per dense measurement above 128 KB comes from `mmap` and
+  pays page faults each time; one reused buffer per batch avoids it.
+
+**Next.**
+1. Per-shot sign registers instead of frame words: for each rotation and
+   measurement, the parity of the errors that flip it, precomputed per
+   noise site (Clifft's expression registers), so a split-off shot does
+   O(errors) frame work instead of conjugating words over all virtual
+   qubits (frame measurements and conjugation are ~25% of the time now).
+2. SIMD dense kernels (rotation, expectation, `retired`); and keep the
+   outcome probability in the stack entry so a split-off group does not
+   recompute the expectation.
+3. Stim's format on the near-Clifford backend (`T`, `T_DAG`, Clifft's
+   rotation gates, detection events).
+
 ## 2026-11-06 — Pauli noise on the near-Clifford backend (0.1.8)
 
 0.1.7 was never published: CI's newer clippy (Rust 1.99, against 1.97

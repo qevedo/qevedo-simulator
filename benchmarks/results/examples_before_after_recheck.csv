@@ -1,8 +1,5 @@
 case,rounds,before_seconds,after_seconds,best_of_ratio,median_paired_ratio
-shots 24 qubits 1M shots,25,1.055,1.043,0.989,1.016
-nearclifford 100 qubits 24 T,25,1.638,1.691,1.032,1.026
-pauliprop 20 steps 0.2,25,0.148,0.146,0.986,1.000
-pauliprop 5 steps 1.2,25,0.438,0.425,0.970,0.989
-stabilizer d51,25,0.303,0.312,1.030,1.006
-stabilizer d21 noise 0.001,25,0.033,0.032,0.970,1.000
-stabilizer d51 noise 0.001,25,0.433,0.427,0.986,0.989
+statevector random 26 f32,25,2.244,2.275,1.014,1.016
+statevector qft 26 f32,25,0.842,0.849,1.008,1.023
+pauliprop 20 steps 0.2,25,0.144,0.142,0.986,1.014
+stabilizer d21 noise 0.001,25,0.03,0.03,1.000,1.000

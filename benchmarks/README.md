@@ -16,10 +16,10 @@ benchmarks/
 │   ├── output.csv              records and detection events into NumPy: Qevedo vs Stim
 │   ├── output_before_after.csv the same, two Qevedo builds interleaved (0.1.3 vs 0.1.4)
 │   ├── mpp*.csv                MPP toric-code memory with correlated errors: Qevedo vs Stim
-│   ├── examples_before_after*.csv the Rust examples, two builds interleaved (0.1.4 vs 0.1.5)
+│   ├── examples_before_after*.csv the Rust examples, two builds interleaved (0.1.8 vs 0.1.9)
 │   ├── mps.csv                 matrix product states: Qevedo vs Qiskit Aer vs quimb
 │   ├── nearclifford.csv        Clifford+T circuits: Qevedo vs Qiskit Aer
-│   ├── noisy_nearclifford*.csv noisy Clifford+T circuits: Qevedo vs Clifft
+│   ├── noisy_nearclifford*.csv noisy Clifford+T circuits: Qevedo vs Clifft, and two Qevedo builds
 │   ├── pauliprop.csv           expectation values: Qevedo vs IBM's pauli-prop
 │   └── stabilizer_steps.csv    how each optimisation changed the d=101 time
 ├── charts/                     SVGs drawn from results/ by plot.py
@@ -34,6 +34,7 @@ benchmarks/
 ├── compare_mps.py              times Qiskit Aer's and quimb's MPS simulators
 ├── compare_nearclifford.py     times Qiskit Aer's methods on Clifford+T circuits
 ├── bench_noisy_nearclifford.py noisy Clifford+T circuits against Clifft -> noisy_nearclifford*.csv
+├── compare_noisy_builds.py     the same circuits, two builds interleaved -> noisy_nearclifford_before_after.csv
 ├── compare_pauliprop.py        times IBM's pauli-prop on an expectation value
 ├── bench_pauliprop.py          runs Qevedo and pauli-prop on every case -> pauliprop.csv
 └── plot.py                     results/*.csv -> charts/*.svg
@@ -164,17 +165,24 @@ stim 1.16.0 and pymatching 2.4.0.
 `mps`, `nearclifford`, `pauliprop`, `stabilizer`, including its Stim
 `detectors` mode) from two directories of binaries in alternation, 9
 rounds, and records each build's best time and the median of the
-per-round ratios. `examples_before_after.csv` compares 0.1.5 (the same Rust core as 0.1.6,
-which changed only the Python layer) with the build released as 0.1.8 on
-the 4-vCPU VM; `examples_before_after_recheck.csv`
-reruns, with 25 rounds, the cases whose best-of or median ratio came out
-above 1.03 in that run. In the rerun every median ratio is at most 1.026
-(near-Clifford, 100 qubits); two best-of ratios are 1.032 (the same case)
-and 1.030 (stabilizer, d = 51). The near-Clifford case does the same work
-in both builds (same counts, and the same instruction counts in every hot
-function under callgrind); built for AVX2 instead of this machine's
-AVX-512 the new build was 5% faster on it, so the remainder is where the
-compiler placed the code.
+per-round ratios. `examples_before_after.csv` compares 0.1.8 with the
+build released as 0.1.9 on the 4-vCPU VM, which changed only the
+near-Clifford backend: its 100-qubit, 24-T case took 0.41 s against
+1.86 s (median ratio 0.224). Every other case moved by at most 3.0% (median
+ratio of statevector QFT 26, f32: 1.030, of code the change does not
+touch); `examples_before_after_recheck.csv` reruns, with 25 rounds, the
+four cases with a median ratio above 1.02, and every median ratio there
+is at most 1.023.
+
+## Noisy near-Clifford, before and after
+
+`compare_noisy_builds.py` times the circuits of `bench_noisy_nearclifford.py`
+(and three noise rates of its sweep) from two Python environments with the
+two builds installed, in alternation, 5 rounds, best of 3 per process.
+`noisy_nearclifford_before_after.csv` compares 0.1.8 with the build
+released as 0.1.9 on the 4-vCPU VM: the after / before ratio is 0.25-0.59
+on every case (0.24-0.57 median paired), and 0.71 on the circuit without
+errors.
 
 ## Matrix product states
 

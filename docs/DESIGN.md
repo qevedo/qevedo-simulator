@@ -604,6 +604,12 @@ non-Clifford rotation activates at most one qubit.
 - **Active qubits only:** it is measured on `φ`. A Clifford on the active
   qubits (applied to `φ` and prepended to the frame) then turns the measured
   Pauli into Z on one qubit, which is retired to dormant, halving `φ`.
+  On `φ`, the projection, that Clifford and the removal of the qubit are one
+  gather into the half-size state (`Dense::retired`): every gate of the
+  plan but its last H fixes the indices with the retired bit clear, so the
+  new amplitude at `a` is `(φ(a0) ± c φ(a0 ^ x)) / √(2 prob)` (or one
+  amplitude of `φ` for a Z-type Pauli). Before 0.1.9 these were separate
+  passes, up to two per gate.
 
 The cost is exponential only in the number of active qubits. A dry run of
 the frame alone finds the exact peak, because which qubits are active never
@@ -629,12 +635,14 @@ the tree alone and 1.3 s with the frames.
 **Noise** (`nearclifford/noisy.rs`). Pauli channels (all of `Noise`) use
 per-shot Pauli frames from the first channel on, as Clifft's virtual Pauli
 frame does. Each shot is in the state `C P_s (φ_g ⊗ |0...0>)`: the frame `C`
-and the active qubits are shared by all shots of a batch, the dense part
-`φ_g` by the shots of a group `g`, and `P_s` is the shot's own.
+and the active qubits are shared by all shots, the dense part `φ_g` by the
+shots of a group `g`, and `P_s` is the shot's own.
 - An error `E` on physical qubits is the virtual Pauli `C† E C`; the shots
   it hits multiply it into their frames. The gaps between errors are drawn
-  geometrically, as in the stabilizer sampler, and the images of `X_q` and
-  `Z_q` are pulled back only when an error on `q` occurs.
+  geometrically, as in the stabilizer sampler, over a whole run of
+  channels of the same probability (all the sites between two rotations
+  or measurements, typically), so a shot draws one gap per error rather
+  than one per channel.
 - Clifford gates leave the frames alone (`G C P_s = (G C) P_s`); Cliffords
   prepended to `C` (gathering, collapses, retiring) conjugate them.
 - A rotation `exp(-iθ/2 P')` passes through `P_s` as `exp(+iθ/2 P')` where
@@ -648,41 +656,46 @@ and the active qubits are shared by all shots of a batch, the dense part
   scratch column, then multiplies the frames of the shots that read 1 by
   `C† X_q C`.
 
-All groups of a batch advance in lockstep, so each Clifford gate,
-gathering and retirement is done once per batch, and the dense work once
-per group. A split copies out the smaller side; the larger keeps its layout
-with the leavers cleared from a mask (compacted once a quarter of the slots
-are dead). Batches have at most 2^27 amplitudes' worth of shots (every shot
-could end in its own group), at least 64 and at most a sixteenth of the
-shots, and run in parallel with their own random streams, so the counts
-depend on the seed and not on the thread count. Noise does not change
-which qubits are active, so `peak_active_qubits` stays exact. Noiseless
-circuits do not take this path: their counts are the same as in 0.1.5 and
-0.1.6 for the same seed (checked against the 0.1.5 wheel; 0.1.6 changed
-only the Python layer).
+Nothing that happens to `C` depends on a shot, so `compile` walks the
+circuit once with a symbolic state and writes a program of steps on `P_s`
+and `φ_g` alone: the Cliffords that conjugate the frames, rotations with
+the Pauli (on positions) and the virtual Pauli whose anticommutation flips
+the angle, the three kinds of measurement with their collapse or retire
+Cliffords, and noise runs with the images of `X_q` and `Z_q` at each site.
+`run` then takes one group at a time through the whole program, depth
+first: at a split one part goes on and the other waits on a stack (sharing
+`φ` copy-on-write). One group's `φ` (256 KB at 14 active qubits) stays in
+the cache from step to step, as in Clifft's per-shot execution; dense
+measurements write into one reused buffer. Batches of at least 256 shots
+and at most a sixteenth of them run in parallel with their own random
+streams, so the counts depend on the seed and not on the thread count.
+Noise does not change which qubits are active, so `peak_active_qubits`
+stays exact. Noiseless circuits do not take this path.
 
-An earlier version (not released; timed with the same script on the same
-machine) split the shots the same way but gave every group its own copy
-of `C`, and ran each group as its own task. Noise
-splits most shots into groups of their own, so it repeated the Clifford
-work per shot. Sharing `C` made the 200-qubit case of the benchmark below
-2.8× faster on 4 threads (3.0× on one), but the 60- and 100-qubit cases
-14-40% slower, because every operation now sweeps the frames of all
-groups; summed over the five cases on one thread, 15.2 s against 22.7 s.
+Two earlier versions (timed with the same script on the same machine) are
+gone. The first gave every group its own copy of `C` and ran each group as
+its own task, repeating the Clifford work per shot. The second (0.1.8)
+shared `C` and moved all groups through each operation in lockstep:
+2.8× faster at 200 qubits, but once errors had split most shots off, each
+operation streamed every group's `φ` through memory (112 MB per batch of
+640 shots at 14 active qubits), at 4-10 ns per amplitude, and the dense
+measurements, done as a projection, up to two passes per Clifford of the
+retire plan and a shrink, took 80% of the time.
 
 **Against Clifft** (`benchmarks/bench_noisy_nearclifford.py`, 4-vCPU VM,
 10,000 shots; random Clifford+T circuits with uniform depolarizing noise,
-the same circuit in both). Clifft is faster on every case, by 3.4-17.8×
-and by 1.5× (4 threads) to 5.1× (1 thread) at 200 qubits. Both reach the
-same peak active width, and Qevedo is within 1.4× of Clifft when the same
-circuit has no errors (100 qubits, 14 T, on one thread: 0.33 s against
-0.23 s; `--sweep`, `results/noisy_nearclifford_sweep.csv`). With errors
-Qevedo's time grows with the number of groups (0.75 s at p = 10⁻⁵, 1.76 s at
-10⁻⁴, 6.73 s at 10⁻³) while Clifft's stays at 0.33-0.35 s, so the cost is
-what each split-off shot carries: a copy of `φ`, its own frame words, and
-a sweep over every group for each operation. Clifft runs one shot at a
-time through a precompiled program, with nothing per shot but `φ` and
-`P_s`.
+the same circuit in both). Clifft is faster on all cases but one, by
+1.8-4.9×; at 200 qubits Qevedo is 1.23× faster on 4 threads and Clifft
+2.5× faster on one. Against 0.1.8, in paired runs on the same machine
+(`benchmarks/compare_noisy_builds.py`), every case is 1.7-4.1× faster.
+On the 100-qubit circuit on one thread (`--sweep`,
+`results/noisy_nearclifford_sweep.csv`): 0.22 s against Clifft's 0.21 s
+without errors, 0.30 s against 0.35 s at p = 10⁻⁵, 0.56 s against 0.35 s at
+10⁻⁴, 1.65 s against 0.36 s at 10⁻³. What a split-off shot still costs
+here: scalar dense kernels (Clifft's run on AVX-512), frame words over
+all virtual qubits conjugated by every gathering and collapse Clifford
+(Clifft keeps a sign register per rotation and measurement), and a
+second expectation pass when a group splits at a dense measurement.
 
 **Correctness** (`tests/nearclifford.rs`, plus unit tests of the dense
 kernels):
@@ -697,8 +710,10 @@ kernels):
 - the dry-run peak against real runs, automatic selection, and
   reproducibility across thread counts;
 - noisy circuits (every channel of `Noise`, between non-Clifford gates,
-  with mid-circuit measurement and reset) against the exact distribution
-  summed over every error, and 300 small circuits with mid-circuit
+  with mid-circuit measurement and reset; and a channel of one probability
+  after every gate, which makes runs of sites) against the exact
+  distribution summed over every error, the one-pass retirement against
+  the projection, gates and shrink it replaces, and 300 small circuits with mid-circuit
   measurements and resets on the noisy path against exact branching;
 - a 150-qubit circuit whose errors split groups at known rates, and
   agreement with Clifft (`results/noisy_nearclifford_agreement.csv`:

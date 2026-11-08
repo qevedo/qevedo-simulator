@@ -504,3 +504,77 @@ fn noisy_path_measures_and_resets_like_the_exact_distribution() {
         }
     }
 }
+
+#[test]
+fn noise_after_every_gate_matches_the_exact_distribution() {
+    // A channel after every gate, all of probability 1/8 (exactly, so that
+    // consecutive channels make one run of sites, through which each shot
+    // draws one gap per error), of different kinds: X, Y or Z flips, a
+    // mixed flip, two-qubit depolarizing noise. Against the exact
+    // distribution summed over every error.
+    let p = 0.125;
+    let flips = [
+        qvd::Noise::Pauli1 {
+            px: p,
+            py: 0.0,
+            pz: 0.0,
+        },
+        qvd::Noise::Pauli1 {
+            px: 0.0,
+            py: p,
+            pz: 0.0,
+        },
+        qvd::Noise::Pauli1 {
+            px: 0.0,
+            py: 0.0,
+            pz: p,
+        },
+        qvd::Noise::Pauli1 {
+            px: p / 2.0,
+            py: 0.0,
+            pz: p / 2.0,
+        },
+    ];
+    let shots = 40_000;
+    for seed in 0..12u64 {
+        let n = 2 + seed as usize % 2;
+        let gates = random_gate_circuit(n, 5, 300 + seed);
+        let mut circuit = Circuit::new(n);
+        for (i, instruction) in gates.instructions.into_iter().enumerate() {
+            let qubits = match &instruction {
+                Instruction::Gate { qubits, .. } => qubits.clone(),
+                _ => Vec::new(),
+            };
+            circuit.instructions.push(instruction);
+            match qubits.len() {
+                1 => circuit.noise(flips[(i + seed as usize) % 4].clone(), &qubits),
+                2 => circuit.noise(qvd::Noise::Depolarize2(p), &qubits),
+                _ => &mut circuit,
+            };
+        }
+        circuit.measure_all();
+        assert!(circuit.has_noise() && !qvd::stabilizer::is_clifford(&circuit));
+        let options = Options {
+            backend: Backend::NearClifford,
+            seed: Some(seed),
+            ..Options::default()
+        };
+        let result = qvd::run::<f64>(&circuit, shots, &options).unwrap();
+        let exact = exact_distribution(&circuit);
+        for key in result.counts.keys() {
+            assert!(
+                exact.get(key).is_some_and(|&p| p > 1e-12),
+                "seed {seed}: impossible outcome {key}"
+            );
+        }
+        for (key, &p) in &exact {
+            let p = p.clamp(0.0, 1.0);
+            let observed = *result.counts.get(key).unwrap_or(&0) as f64 / shots as f64;
+            let sigma = (p * (1.0 - p) / shots as f64).sqrt();
+            assert!(
+                (observed - p).abs() <= 5.0 * sigma + 3.0 / shots as f64,
+                "seed {seed} {key}: observed {observed}, exact {p}"
+            );
+        }
+    }
+}
