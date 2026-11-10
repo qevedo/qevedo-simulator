@@ -1,0 +1,3 @@
+qubits,depth,t_count,p,threads,rounds,before_seconds,after_seconds,best_of_ratio,median_paired_ratio
+24,20,10,0.001,4,25,0.0215,0.0187,0.871,0.957
+24,20,10,0.001,1,25,0.0659,0.0590,0.895,0.864

@@ -7,6 +7,107 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-10 — AVX2 dense kernels on the near-Clifford backend (0.1.10)
+
+**What.**
+- `nearclifford/dense/avx2.rs` (new, built where AVX2 and FMA are enabled
+  at compile time, as in the x86-64-v3 wheels): `expectation`, `rotate`
+  and `retired_x`, the X-type case of `Dense::retired`, two amplitudes
+  per 256-bit register as they lie in memory. With `x` split into bit 0
+  and the rest (`xh`), the partners of the register at `i` are the
+  register at `i ^ xh`, swapped when `x` has bit 0, so every Pauli reads
+  whole registers. That matters: positions follow activation order, and
+  in the 100-qubit benchmark 6 of 14 measured Paulis and 4 of 14 rotation
+  Paulis have an X part at position 0, where a "contiguous below the
+  lowest X bit" blocking would fall back to one amplitude at a time.
+  Signs come from a per-call table of the low bits and one population
+  count per block of 16, applied as sign-bit XORs. The expectation visits
+  each pair once and keeps only the product its phase needs.
+- `Dense::rotate`, `expectation` and `retired` dispatch to them for states
+  of 32 or more amplitudes, over parallel ranges for large states (the
+  same thresholds as before). The scalar loops remain for other builds
+  (ARM wheels) and small states, and are the reference in the tests;
+  their serial sums keep four accumulators.
+- Tests: `vectorized_kernels_match_the_scalar_ones` (every Pauli with
+  both signs on 5 and 6 positions, then Paulis with X parts from each of
+  positions 0-3 on 15, through the parallel ranges);
+  `retiring_a_large_state_matches_the_gather`; the one-pass retirement
+  test now runs every Pauli on 4, 5 and 6 positions against the
+  projection, gates and shrink. Three mutations of the kernels (the j = 0
+  sign table's lanes, the pair-visit factor of 2, the partner register's
+  swap-back) each fail a test.
+- `compare_noisy_builds.py --qubits N`, to recheck short cases.
+
+**Why.** Item 2 of Next, chosen over item 1 (sign registers) after
+profiling 0.1.9 on the 100-qubit, 14-T, p = 10⁻³ circuit on one thread
+(temporary timers per step kind): dense measurements took 0.90-1.0 s and
+rotations 0.55 s of about 2.3 s, conjugating the frames and frame
+measurements together 0.7 s. The dense work ran at 1.35 ns per amplitude
+(expectation) and 2.4 ns per output amplitude (retirement) on a state that
+sits in the cache, so it was compute-bound, and a smaller, self-contained
+change could take most of it. The cause of the slow expectation was the
+sum: one floating-point accumulator costs 2.1 ns per term (the adder's
+latency), eight cost 0.3.
+
+**Measured** (4-vCPU Xeon VM, wheels built for x86-64-v3 like the
+release).
+- Kernels, 2^14 amplitudes, best of 30 × 100 calls (temporary example, not
+  kept), ns per amplitude, before → after: expectation 0.87-1.08 →
+  0.22-0.43; rotation 1.23-1.41 → 0.38-0.47; X-type retirement 1.31-1.37
+  → 0.32-0.43 per input amplitude (Z-type retirement, a copy, unchanged).
+- Noisy cases, 0.1.9 against this build, 5 interleaved rounds
+  (`results/noisy_nearclifford_before_after.csv`): best-of ratio 0.60-0.91
+  on the noisy cases (median paired 0.65-0.91), 0.95 without errors. 100
+  qubits, p = 10⁻³: 1.71 → 1.21 s on one thread, 0.52 → 0.31 s on four. The
+  24-qubit case on 4 threads (22 ms) read 1.06 best-of, 0.89 median; 25
+  rounds of both 24-qubit cases (`..._recheck.csv`): 0.87 and 0.90 best-of.
+- Against Clifft 0.13 (`results/noisy_nearclifford.csv`): Clifft faster on
+  9 of 10 cases by 1.6-3.4× (was 1.8-4.9×); Qevedo 1.10× faster at 200
+  qubits on 4 threads (the 0.1.9 run had 1.23×; the 200-qubit case gained
+  least, 0.90 before/after, as its peak is 12 active qubits). Sweep, 100
+  qubits, one thread, p = 0 / 10⁻⁵ / 10⁻⁴ / 10⁻³: 0.217 / 0.292 / 0.417 /
+  1.191 s against Clifft's 0.217 / 0.352 / 0.339 / 0.409 s (0.1.9: 0.217 /
+  0.304 / 0.565 / 1.651 s).
+- Same counts: the agreement file is unchanged to the digit (same seeds,
+  same samples), and six circuits (four noiseless, two noisy) give
+  identical counts digests in both builds for seed 7.
+- Rust examples, 9 rounds (`results/examples_before_after.csv`): the
+  near-Clifford example 0.44 → 0.30 s (0.686 best-of, 0.782 median); the
+  `bench`, `stabilizer` and `pauliprop` binaries have byte-identical
+  `.text`, so their medians (up to 1.061) are the VM's noise; `shots`
+  1.010 and `mps` 0.977 / 1.000, the binaries that changed.
+- Profile after (same timers): dense measurements 0.37 s, rotations 0.31
+  s, conjugations 0.28 s, frame measurements 0.41 s of about 1.4 s: the
+  frame work is now half the time.
+- `cargo test --release` passes with AVX2 (native) and without
+  (`-C target-cpu=x86-64`, the scalar path); clippy is clean in both;
+  pytest 147 passed.
+
+**Learned.**
+- A scalar rewrite (blocked signs from a table, unchecked indexing, four
+  accumulators) gave only 1.3-1.7×; with contiguous or XOR-scrambled
+  partner loads equally fast, the loops were at scalar throughput.
+- Per-register population counts for the signs held the first AVX2
+  retirement at 0.64-0.66 ns per input amplitude on most Paulis; a table
+  per call and one count per block of 16 brought it to 0.32-0.48.
+- Summing both `Re` and `Im` products over all amplitudes (the full sum)
+  took 0.42-0.47 ns per amplitude; visiting pairs once with the one product
+  the phase needs, 0.22-0.35 (0.43 with `xh = 0`, which has no pairs).
+- Forcing the dense kernels serial inside each batch (no nested rayon)
+  changed nothing measurable (2.41 s against 2.28 s, within noise).
+- The VM's timing noise in a microbenchmark is ±50% between runs; best of
+  30 interleaved repetitions was stable to a few percent.
+
+**Release.** 0.1.9 never reached PyPI (its release job hit an HTTP 504),
+so 0.1.10 carries both 0.1.9's program-per-group rewrite and these kernels.
+
+**Next.**
+1. Sign registers instead of frame words (now half of the noisy time).
+2. AVX-512 kernels behind runtime detection (Clifft's are AVX-512), or the
+   expectation of the next dense measurement accumulated during the
+   retirement that precedes it (one pass fewer per measurement).
+3. Stim's format with `T` / `T_DAG` on the near-Clifford backend.
+
 ## 2026-11-08 — Noisy near-Clifford: one group at a time through a compiled program (0.1.9)
 
 **What.**

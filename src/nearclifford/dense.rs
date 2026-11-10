@@ -4,12 +4,87 @@
 //! `p`. Paulis on positions are `(x, z, negative)` bit masks meaning
 //! `(-1)^negative i^{|x & z|} X^x Z^z` (so `(1, 1)` on a qubit is Y).
 
+use std::ops::Range;
+
 use rayon::prelude::*;
 
 use crate::matrix::C64;
 
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+))]
+mod avx2;
+
 /// Indices at or above which loops run in parallel.
 const PARALLEL: usize = 1 << 14;
+
+/// Whether the AVX2 kernels take states of `len` amplitudes (at least two
+/// blocks); smaller states, and builds without AVX2 and FMA, use the scalar
+/// loops.
+#[inline(always)]
+fn vectorized(len: usize) -> bool {
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
+    {
+        len >= 2 * avx2::BLOCK
+    }
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    )))]
+    {
+        let _ = len;
+        false
+    }
+}
+
+/// Run `f` on consecutive ranges covering `0..units`, in parallel for
+/// large counts (the ranges are multiples of the AVX2 block).
+#[cfg_attr(
+    not(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    )),
+    allow(dead_code)
+)]
+fn ranges(units: usize, f: impl Fn(Range<usize>) + Sync + Send) {
+    let size = PARALLEL / 8;
+    if units >= PARALLEL / 2 {
+        (0..units.div_ceil(size))
+            .into_par_iter()
+            .for_each(|c| f(c * size..units.min((c + 1) * size)));
+    } else {
+        f(0..units);
+    }
+}
+
+/// `f` summed over consecutive ranges covering `0..units`, as [`ranges`].
+#[cfg_attr(
+    not(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    )),
+    allow(dead_code)
+)]
+fn range_sum(units: usize, f: impl Fn(Range<usize>) -> f64 + Sync + Send) -> f64 {
+    let size = PARALLEL / 8;
+    if units >= PARALLEL / 2 {
+        (0..units.div_ceil(size))
+            .into_par_iter()
+            .map(|c| f(c * size..units.min((c + 1) * size)))
+            .sum()
+    } else {
+        f(0..units)
+    }
+}
 
 /// A Pauli on positions; see the module documentation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,7 +147,15 @@ fn sum(count: usize, f: impl Fn(usize) -> f64 + Sync + Send) -> f64 {
             .map(f)
             .sum()
     } else {
-        (0..count).map(f).sum()
+        // Four running sums: one waits on the adder's latency at every
+        // term (2 ns per term, against 0.3 with several).
+        let mut acc = [0.0; 4];
+        for k in (0..count & !3).step_by(4) {
+            for (e, a) in acc.iter_mut().enumerate() {
+                *a += f(k + e);
+            }
+        }
+        (count & !3..count).map(f).sum::<f64>() + acc.iter().sum::<f64>()
     }
 }
 
@@ -177,6 +260,26 @@ impl Dense {
         let (c, s) = ((theta / 2.0).cos(), (theta / 2.0).sin());
         // exp(-iθ/2 P)|i> = c |i> - i s phase sign(i) |i ^ x>.
         let m = C64::new(0.0, -s) * p.phase();
+        let len = self.amps.len();
+        if vectorized(len) {
+            #[cfg(all(
+                target_arch = "x86_64",
+                target_feature = "avx2",
+                target_feature = "fma"
+            ))]
+            {
+                let units = if p.x & !1 == 0 { len } else { len / 2 };
+                let ptr = Shared(self.amps.as_mut_ptr());
+                // SAFETY: the ranges touch disjoint amplitudes.
+                ranges(units, |r| unsafe { avx2::rotate(ptr.get(), p, c, m, r) });
+            }
+            return;
+        }
+        self.rotate_scalar(p, c, m);
+    }
+
+    /// [`rotate`](Self::rotate) one amplitude at a time.
+    fn rotate_scalar(&mut self, p: Pauli, c: f64, m: C64) {
         if p.x == 0 {
             let (plus, minus) = (C64::new(c, 0.0) + m, C64::new(c, 0.0) - m);
             self.for_half(None, |i, amps| {
@@ -208,6 +311,25 @@ impl Dense {
     /// `2 sign(i) Re(conj(b) a)` for `σ = 1`, and `2i sign(i) Im(conj(b) a)`
     /// for `σ = -1`, so the sum is of reals.
     pub fn expectation(&self, p: Pauli) -> f64 {
+        let len = self.amps.len();
+        if vectorized(len) {
+            #[cfg(all(
+                target_arch = "x86_64",
+                target_feature = "avx2",
+                target_feature = "fma"
+            ))]
+            {
+                let units = if p.x & !1 == 0 { len } else { len / 2 };
+                let ptr = Shared(self.amps.as_ptr() as *mut C64);
+                // SAFETY: only reads, within the state.
+                return range_sum(units, |r| unsafe { avx2::expectation(ptr.get(), p, r) });
+            }
+        }
+        self.expectation_scalar(p)
+    }
+
+    /// [`expectation`](Self::expectation) one amplitude at a time.
+    fn expectation_scalar(&self, p: Pauli) -> f64 {
         let amps = &self.amps;
         if p.x == 0 {
             let sum = sum(amps.len(), |i| p.sign(i) * amps[i].norm_sqr());
@@ -298,7 +420,30 @@ impl Dense {
         let half = self.amps.len() / 2;
         let amps = &self.amps;
         buffer.clear();
-        if p.x != 0 {
+        if p.x != 0 && vectorized(self.amps.len()) {
+            #[cfg(all(
+                target_arch = "x86_64",
+                target_feature = "avx2",
+                target_feature = "fma"
+            ))]
+            {
+                let scale = (0.5 / probability).sqrt();
+                let m = p.phase() * eigenvalue * scale;
+                buffer.reserve(half);
+                let (from, to) = (
+                    Shared(amps.as_ptr() as *mut C64),
+                    Shared(buffer.as_mut_ptr()),
+                );
+                // SAFETY: the ranges write disjoint parts of the reserved
+                // buffer, all of it, before its length is set.
+                unsafe {
+                    ranges(half, |r| {
+                        avx2::retired_x(from.get(), p, m, scale, to.get(), r)
+                    });
+                    buffer.set_len(half);
+                }
+            }
+        } else if p.x != 0 {
             let j = p.x.trailing_zeros();
             let low = (1usize << j) - 1;
             let scale = (0.5 / probability).sqrt();
@@ -426,9 +571,99 @@ mod tests {
         assert!((norm - 1.0).abs() < 1e-12);
     }
 
+    /// Every Pauli on `qubits` positions (with both signs), and a few on
+    /// larger states where the kernels run in parallel.
+    fn paulis(qubits: usize) -> impl Iterator<Item = Pauli> {
+        let all = 1u64 << qubits;
+        (0..all).flat_map(move |x| {
+            (0..all).flat_map(move |z| [false, true].map(|negative| Pauli { x, z, negative }))
+        })
+    }
+
+    /// The AVX2 kernels (states of at least 32 amplitudes, in builds with
+    /// AVX2 and FMA) against the scalar ones: every Pauli on 5 and 6
+    /// positions, then Paulis with X parts from every low position on 15,
+    /// where the loops run over parallel ranges.
+    #[test]
+    fn vectorized_kernels_match_the_scalar_ones() {
+        let check = |state: &Dense, p: Pauli| {
+            let e = state.expectation(p);
+            assert!((e - state.expectation_scalar(p)).abs() < 1e-12, "{p:?}");
+            let theta = 0.3 + p.x as f64 * 0.01;
+            let (c, m) = (
+                (theta / 2.0).cos(),
+                C64::new(0.0, -(theta / 2.0).sin()) * p.phase(),
+            );
+            let mut fast = state.clone();
+            fast.rotate(p, theta);
+            let mut slow = state.clone();
+            slow.rotate_scalar(p, c, m);
+            for (a, b) in fast.amps.iter().zip(&slow.amps) {
+                assert!((a - b).norm() < 1e-12, "{p:?}");
+            }
+        };
+        for qubits in [5, 6] {
+            let state = random_state(qubits, qubits as u64);
+            for p in paulis(qubits) {
+                check(&state, p);
+            }
+        }
+        let state = random_state(15, 7);
+        for low in 0..4 {
+            for (x, z) in [(0b1011_0110_0101_0000, 0b0110_1100_1011_0111), (0b100, 0b1)] {
+                let negative = low % 2 == 1;
+                check(
+                    &state,
+                    Pauli {
+                        x: (x << low) & 0x7fff | 1 << low,
+                        z,
+                        negative,
+                    },
+                );
+                check(
+                    &state,
+                    Pauli {
+                        x: 0,
+                        z: z | 1 << low,
+                        negative,
+                    },
+                );
+            }
+        }
+    }
+
+    /// `retired` on a large state (parallel ranges), against the same
+    /// gather done one amplitude at a time.
+    #[test]
+    fn retiring_a_large_state_matches_the_gather() {
+        let state = random_state(15, 9);
+        for low in 0..4 {
+            let p = Pauli {
+                x: (0b0110_0101_1100_1000 << low) & 0x7fff | 1 << low,
+                z: 0b0101_1011_0110_0011,
+                negative: low == 2,
+            };
+            let e = state.expectation(p);
+            let probability = (1.0 - e) / 2.0;
+            let fused = state.retired(p, -1.0, probability, false, Vec::new());
+            let j = p.x.trailing_zeros();
+            let low_mask = (1usize << j) - 1;
+            let m = p.phase() * -1.0;
+            for (a, new) in fused.amps.iter().enumerate() {
+                let a0 = (a & low_mask) | ((a & !low_mask) << 1);
+                let x = p.x as usize;
+                let expected = (state.amps[a0] + m * p.sign(a0 ^ x) * state.amps[a0 ^ x])
+                    * (0.5 / probability).sqrt();
+                assert!((new - expected).norm() < 1e-12, "{p:?}");
+            }
+        }
+    }
+
     /// `retired` against what it replaces: the projection, the plan's gates
     /// one by one (as `G†`), the X for a target reading 1, and the shrink;
-    /// for every Pauli on 4 positions, both eigenvalues, on random states.
+    /// for every Pauli on 4, 5 and 6 positions (the last two through the
+    /// AVX2 kernels where they are built), both eigenvalues, on random
+    /// states.
     #[test]
     fn retiring_in_one_pass_matches_the_gates_one_by_one() {
         use crate::stabilizer::Clifford;
@@ -442,14 +677,14 @@ mod tests {
             other => unreachable!("{other:?}"),
         };
         let mut checked = 0;
-        for x in 0..16u64 {
-            for z in 0..16u64 {
-                for negative in [false, true] {
-                    let p = Pauli { x, z, negative };
+        for qubits in [4, 5, 6] {
+            for p in paulis(qubits) {
+                let Pauli { x, z, negative } = p;
+                {
                     if p.is_identity() {
                         continue;
                     }
-                    let state = random_state(4, x * 37 + z * 3 + negative as u64);
+                    let state = random_state(qubits, x * 37 + z * 3 + negative as u64);
                     let e = state.expectation(p);
                     for eigenvalue in [1.0, -1.0] {
                         let probability = (1.0 + eigenvalue * e) / 2.0;
@@ -477,7 +712,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checked, 2 * 2 * 255);
+        assert_eq!(checked, 2 * 2 * (255 + 1023 + 4095));
     }
 
     #[test]

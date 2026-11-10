@@ -10,6 +10,9 @@ their ratio (after / before), and the median of the per-round ratios.
     python benchmarks/compare_noisy_builds.py --before /venv-old/bin/python \
         --after /venv-new/bin/python --rounds 5 \
         --out benchmarks/results/noisy_nearclifford_before_after.csv
+
+`--qubits 24` keeps only the cases of that many qubits (to recheck a short
+case with many more rounds).
 """
 
 import argparse
@@ -70,9 +73,12 @@ def main():
     ap.add_argument("--after", required=True, help="Python with the new build")
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--qubits", type=int, default=None, help="only cases of this many qubits")
     args = ap.parse_args()
     rows = []
     for case in CASES:
+        if args.qubits is not None and case[0] != args.qubits:
+            continue
         times = {"before": [], "after": []}
         for r in range(args.rounds):
             order = ("before", "after") if r % 2 == 0 else ("after", "before")

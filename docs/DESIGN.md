@@ -682,20 +682,47 @@ operation streamed every group's `φ` through memory (112 MB per batch of
 measurements, done as a projection, up to two passes per Clifford of the
 retire plan and a shrink, took 80% of the time.
 
+**Dense kernels** (`nearclifford/dense.rs`, `nearclifford/dense/avx2.rs`).
+With one group per shot, most of the time went to three loops over `φ`:
+the expectation of a measured Pauli, the rotation, and the one-pass
+retirement. On a state in the cache (2^14 amplitudes) the scalar loops ran
+at 0.9-1.4 ns per amplitude: one complex number at a time, a population
+count per sign, and the expectation's sum waiting on one floating-point
+accumulator (a sum of 2^14 terms with one accumulator took 2.1 ns per term
+against 0.3 with eight). In builds with AVX2 and FMA (the x86-64 wheels
+target x86-64-v3) states of 32 or more amplitudes go through
+`dense/avx2.rs`: a register holds the two amplitudes at `i, i + 1` as they
+lie in memory, and with `x = x0 + xh` (bit 0 and the rest) the partners of
+that register are the register at `i ^ xh`, swapped when `x0 = 1`, so every
+Pauli, including those whose X part starts at position 0 (common, since
+positions follow activation order), reads whole registers. Signs
+`(-1)^{|z & i|}` are XOR-linear in `i`: a per-call table for the low bits
+and one population count per block of 16, applied as sign-bit XORs. The
+expectation keeps only the product its phase needs (`Re(conj(b) a)` when
+`sign(x) = 1`, else `Im`) and visits each pair once. Measured in a
+microbenchmark on 2^14 amplitudes: expectation 0.88 → 0.22-0.43 ns per
+amplitude, rotation 1.3 → 0.38-0.47, retirement 1.3 → 0.32-0.43 (per input
+amplitude). Other builds (ARM wheels among them), and smaller states, use
+the scalar loops, whose serial sums now keep four accumulators. The
+Z-type retirement is a copy and stays scalar.
+
 **Against Clifft** (`benchmarks/bench_noisy_nearclifford.py`, 4-vCPU VM,
 10,000 shots; random Clifford+T circuits with uniform depolarizing noise,
 the same circuit in both). Clifft is faster on all cases but one, by
-1.8-4.9×; at 200 qubits Qevedo is 1.23× faster on 4 threads and Clifft
-2.5× faster on one. Against 0.1.8, in paired runs on the same machine
-(`benchmarks/compare_noisy_builds.py`), every case is 1.7-4.1× faster.
-On the 100-qubit circuit on one thread (`--sweep`,
-`results/noisy_nearclifford_sweep.csv`): 0.22 s against Clifft's 0.21 s
-without errors, 0.30 s against 0.35 s at p = 10⁻⁵, 0.56 s against 0.35 s at
-10⁻⁴, 1.65 s against 0.36 s at 10⁻³. What a split-off shot still costs
-here: scalar dense kernels (Clifft's run on AVX-512), frame words over
-all virtual qubits conjugated by every gathering and collapse Clifford
-(Clifft keeps a sign register per rotation and measurement), and a
-second expectation pass when a group splits at a dense measurement.
+1.6-3.4×; at 200 qubits Qevedo is 1.10× faster on 4 threads and Clifft
+2.4× faster on one. Against 0.1.8, in paired runs on the same machine
+(`benchmarks/compare_noisy_builds.py`), 0.1.9 was 1.7-4.1× faster on every
+case, and the AVX2 kernels of 0.1.10 took 0.60-0.91 of 0.1.9's time on the
+noisy cases. On the 100-qubit circuit on one thread (`--sweep`,
+`results/noisy_nearclifford_sweep.csv`): 0.22 s against Clifft's 0.22 s
+without errors, 0.29 s against 0.35 s at p = 10⁻⁵, 0.42 s against 0.34 s at
+10⁻⁴, 1.19 s against 0.41 s at 10⁻³. What a split-off shot still costs
+here: frame words over all virtual qubits conjugated by every gathering
+and collapse Clifford (Clifft keeps a sign register per rotation and
+measurement; in the 0.1.9 profile of the 100-qubit case, conjugations and
+frame measurements took about 30% of the time), AVX2 rather than Clifft's
+AVX-512 kernels, and a second expectation pass when a group splits at a
+dense measurement.
 
 **Correctness** (`tests/nearclifford.rs`, plus unit tests of the dense
 kernels):

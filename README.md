@@ -38,8 +38,8 @@ near-Clifford backend (a Clifford frame around a small dense state, after
 Clifft): a 200-qubit Clifford+T circuit with 20 T gates samples 1000 shots in
 0.11 s, where every Qiskit Aer method either takes over 10 minutes or
 does not support it. It samples Pauli noise as well, exactly; Clifft is
-still 1.8–4.9× faster on most noisy circuits, and Qevedo 1.2× faster on the
-largest (details below). Expectation values of circuits far beyond any state
+still 1.6–3.4× faster on most noisy circuits, and Qevedo 1.1× faster on the
+largest on 4 threads (details below). Expectation values of circuits far beyond any state
 vector come from Pauli propagation: `<Z62>` of IBM's 127-qubit, 20-step
 kicked Ising "utility" circuit in 0.25–9.6 s, with the same result as IBM's
 pauli-prop and 14.6–117× faster than it end to end (5.0–15.7× faster than
@@ -385,26 +385,31 @@ with uniform depolarizing noise of strength p, the same circuit in both,
 
 | Circuit | p | Peak active qubits | Qevedo, 4 threads | Clifft, 4 threads | Qevedo, 1 thread | Clifft, 1 thread |
 |---|---|---|---|---|---|---|
-| 24 qubits, depth 20, 10 T | 0.001 | 10 | 0.026 s | **0.012 s** | 0.069 s | **0.030 s** |
-| 60 qubits, depth 20, 12 T | 0.001 | 12 | 0.115 s | **0.063 s** | 0.327 s | **0.130 s** |
-| 100 qubits, depth 30, 14 T | 0.001 | 14 | 0.651 s | **0.200 s** | 1.66 s | **0.338 s** |
-| 200 qubits, depth 40, 12 T | 0.001 | 12 | **0.643 s** | 0.789 s | 2.33 s | **0.923 s** |
-| 60 qubits, depth 20, 12 T | 0.01 | 12 | 0.261 s | **0.076 s** | 0.679 s | **0.159 s** |
+| 24 qubits, depth 20, 10 T | 0.001 | 10 | 0.026 s | **0.014 s** | 0.060 s | **0.029 s** |
+| 60 qubits, depth 20, 12 T | 0.001 | 12 | 0.084 s | **0.053 s** | 0.270 s | **0.144 s** |
+| 100 qubits, depth 30, 14 T | 0.001 | 14 | 0.368 s | **0.164 s** | 1.13 s | **0.335 s** |
+| 200 qubits, depth 40, 12 T | 0.001 | 12 | **0.735 s** | 0.806 s | 2.23 s | **0.921 s** |
+| 60 qubits, depth 20, 12 T | 0.01 | 12 | 0.193 s | **0.074 s** | 0.658 s | **0.197 s** |
 
-Clifft is faster on all but one case, by 1.8–4.9×; at 200 qubits Qevedo is
-1.23× faster on 4 threads (Clifft 2.5× faster on one). Since 0.1.9 Qevedo
+Clifft is faster on all but one case, by 1.6–3.4×; at 200 qubits Qevedo is
+1.10× faster on 4 threads (Clifft 2.4× faster on one). Since 0.1.9 Qevedo
 compiles the shared frame's work once into a program and runs one group of
-shots at a time through it, as Clifft runs one shot at a time; that made
-these cases 1.7–4.1× faster than 0.1.8
+shots at a time through it, as Clifft runs one shot at a time (1.7–4.1×
+faster than 0.1.8), and since 0.1.10 the dense kernels that program spends
+most of its time in (expectation values, rotations and the one-pass
+measurement) use AVX2, two amplitudes per register: the noisy cases are
+1.1–1.7× faster than 0.1.9 in paired runs on the same machine
 (`benchmarks/compare_noisy_builds.py`,
 `results/noisy_nearclifford_before_after.csv`). On one thread, the 100-qubit
-circuit takes 0.22 s against Clifft's 0.21 s without errors and 0.30 s
+circuit takes 0.22 s against Clifft's 0.22 s without errors and 0.29 s
 against 0.35 s at p = 10⁻⁵, where most shots share a dense state; Clifft
-pulls ahead as errors split more shots off (0.56 s against 0.35 s at
-10⁻⁴, 1.65 s against 0.36 s at 10⁻³). Its compiled program runs on
-AVX-512 kernels here and keeps one sign register per rotation and
-measurement per shot, where Qevedo's dense kernels are scalar and each
-shot's frame is words over all virtual qubits.
+pulls ahead as errors split more shots off (0.42 s against 0.34 s at
+10⁻⁴, 1.19 s against 0.41 s at 10⁻³). What a split-off shot still costs
+here is mostly its Pauli frame: words over all virtual qubits, conjugated
+by every gathering and collapse Clifford, where Clifft keeps one sign
+register per rotation and measurement. Clifft's kernels use AVX-512;
+Qevedo's x86-64 wheels use AVX2 (other builds, including ARM, the scalar
+kernels).
 
 The results agree. 200,000 shots each: the whole distributions of three
 6- and 8-qubit circuits pass a chi-square test of homogeneity (p-values
