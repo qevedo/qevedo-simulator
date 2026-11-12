@@ -1,16 +1,16 @@
 case,rounds,before_seconds,after_seconds,best_of_ratio,median_paired_ratio
-statevector random 26 f32,9,2.363,2.416,1.022,1.042
-statevector qft 26 f32,9,0.867,0.868,1.001,0.955
-statevector random 25 f64,9,2.144,2.079,0.970,0.973
-shots 24 qubits 1M shots,9,1.015,1.025,1.010,1.010
-mps random 100 depth 16 chi 128,9,4.204,3.993,0.950,0.977
-mps qft 100,9,0.065,0.063,0.969,1.000
-nearclifford 100 qubits 24 T,9,0.439,0.301,0.686,0.782
-pauliprop 20 steps 0.2,9,0.148,0.143,0.966,1.038
-pauliprop 5 steps 1.2,9,0.458,0.486,1.061,1.018
-stabilizer d21,9,0.028,0.026,0.929,0.964
-stabilizer d51,9,0.289,0.298,1.031,1.024
-stabilizer d21 noise 0.001,9,0.033,0.034,1.030,1.061
-stabilizer d51 noise 0.001,9,0.405,0.407,1.005,0.954
-stim detectors d21 (sample),9,0.063,0.055,0.873,0.905
-stim detectors d51 (sample),9,0.699,0.696,0.996,0.981
+statevector random 26 f32,9,2.474,2.454,0.992,1.006
+statevector qft 26 f32,9,0.934,0.854,0.914,0.999
+statevector random 25 f64,9,2.225,2.217,0.996,0.964
+shots 24 qubits 1M shots,9,0.996,1.046,1.050,1.015
+mps random 100 depth 16 chi 128,9,3.912,3.891,0.995,0.993
+mps qft 100,9,0.066,0.076,1.152,1.041
+nearclifford 100 qubits 24 T,9,0.329,0.357,1.085,1.054
+pauliprop 20 steps 0.2,9,0.134,0.143,1.067,1.030
+pauliprop 5 steps 1.2,9,0.506,0.476,0.941,0.983
+stabilizer d21,9,0.023,0.023,1.000,0.920
+stabilizer d51,9,0.294,0.293,0.997,1.009
+stabilizer d21 noise 0.001,9,0.029,0.031,1.069,1.033
+stabilizer d51 noise 0.001,9,0.412,0.439,1.066,1.029
+stim detectors d21 (sample),9,0.055,0.057,1.036,1.036
+stim detectors d51 (sample),9,0.74,0.668,0.903,0.968

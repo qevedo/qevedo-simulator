@@ -12,7 +12,11 @@ their ratio (after / before), and the median of the per-round ratios.
         --out benchmarks/results/noisy_nearclifford_before_after.csv
 
 `--qubits 24` keeps only the cases of that many qubits (to recheck a short
-case with many more rounds).
+case with many more rounds). `--shots N` times N shots instead of 10,000
+(best of 15 below 1000 shots), to see a fixed cost per run:
+
+    python benchmarks/compare_noisy_builds.py ... --shots 1 \
+        --out benchmarks/results/noisy_nearclifford_before_after_1shot.csv
 """
 
 import argparse
@@ -36,9 +40,9 @@ circuit, _ = noisy_clifford_t(n, depth, t_count, p)
 if p == 0.0:
     circuit.x_error(0, 0.0)
 best = float("inf")
-for _ in range(3):
+for _ in range({repeats}):
     start = time.perf_counter()
-    run(circuit, 10_000, backend="near_clifford", seed=1, threads=threads)
+    run(circuit, {shots}, backend="near_clifford", seed=1, threads=threads)
     best = min(best, time.perf_counter() - start)
 print(best)
 """
@@ -61,8 +65,10 @@ CASES = [
 ]
 
 
-def time_case(python, case):
-    code = CHILD.format(here=str(HERE), case=case)
+def time_case(python, case, shots):
+    # Best of 3 at 10,000 shots; runs of a few milliseconds need more.
+    repeats = 3 if shots >= 1000 else 15
+    code = CHILD.format(here=str(HERE), case=case, shots=shots, repeats=repeats)
     out = subprocess.run([python, "-c", code], capture_output=True, text=True, check=True)
     return float(out.stdout.strip())
 
@@ -74,6 +80,7 @@ def main():
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--out", default=None)
     ap.add_argument("--qubits", type=int, default=None, help="only cases of this many qubits")
+    ap.add_argument("--shots", type=int, default=10_000)
     args = ap.parse_args()
     rows = []
     for case in CASES:
@@ -83,11 +90,11 @@ def main():
         for r in range(args.rounds):
             order = ("before", "after") if r % 2 == 0 else ("after", "before")
             for build in order:
-                times[build].append(time_case(getattr(args, build), case))
+                times[build].append(time_case(getattr(args, build), case, args.shots))
         best = {k: min(v) for k, v in times.items()}
         ratios = [a / b for a, b in zip(times["after"], times["before"])]
         n, depth, t_count, p, threads = case
-        row = dict(qubits=n, depth=depth, t_count=t_count, p=p, threads=threads,
+        row = dict(qubits=n, depth=depth, t_count=t_count, p=p, shots=args.shots, threads=threads,
                    rounds=args.rounds, before_seconds=f"{best['before']:.4f}",
                    after_seconds=f"{best['after']:.4f}",
                    best_of_ratio=f"{best['after'] / best['before']:.3f}",

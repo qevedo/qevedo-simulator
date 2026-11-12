@@ -1,0 +1,3 @@
+case,rounds,before_seconds,after_seconds,best_of_ratio,median_paired_ratio
+mps random 100 depth 16 chi 128,60,3.753,3.705,0.987,1.001
+mps qft 100,60,0.06,0.06,1.000,1.000

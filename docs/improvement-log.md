@@ -7,6 +7,89 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-12 — Sign registers instead of Pauli frames on the noisy near-Clifford path (0.1.11)
+
+**What.**
+- `nearclifford/noisy.rs`: a shot no longer carries a Pauli frame (x and z
+  words over every virtual qubit, conjugated by every gathering, collapse
+  and retire Clifford). A frame is only ever asked whether it anticommutes
+  with a *check* (the virtual Pauli of a rotation, which picks the sign of
+  its angle, or of a measurement, which flips its outcome), and it is a
+  product of *insertions* at known steps (errors, the `X_d` of a 50/50
+  outcome 1, the X on a retired qubit reading 1, a reset's fix), of which
+  only whether each happens depends on the shot. Everything in between is
+  the same in every shot and linear, so each insertion flips a fixed set
+  of checks, its row. `link` turns the compiled program (`Op`) into one on
+  sign registers (`Act`): a shot (`Shots`) keeps one bit per check, an
+  error XORs its row (a few words), a check reads one bit per shot. This is
+  how Clifft (Chase & Labib, arXiv:2604.27058) keeps sign bits of its
+  expressions; Next item 1 of the last run.
+- `rows` finds the rows in the physical picture, where a Pauli in the frame
+  changes only with the physical Clifford gates (the prepended Cliffords
+  are absorbed by `C P C†`), an error is a one-qubit Pauli and a
+  measurement's check is `Z_q`. It walks the program backwards with one
+  slot per check (212 on the 200-qubit benchmark circuit, against 29,000
+  insertions), conjugating the checks back through the physical gates; an
+  `X_q` error's row is the slots with Z on `q`. `compile` records the
+  physical gates and Paulis next to the virtual ones and no longer pulls
+  back two dense virtual images per noisy qubit (the tests still do, for
+  their reference). `Tableau::push_forward_x` gives `C X_v C†` for the two
+  insertions that are virtual by nature.
+- The random draws are unchanged, so the counts for a seed are the same as
+  0.1.10's (digests of five circuits identical; the Clifft agreement file
+  unchanged to the digit).
+- Tests: `sign_registers_match_frames_one_insertion_at_a_time` (random
+  Clifford+T circuits of 5, 9 and 70 qubits with every kind of step:
+  each insertion's row against a frame of its own carried the old way,
+  step by step). Breaking the reverse order of the gates, dropping the
+  collapse Cliffords (in the first version) or swapping two rows in
+  `push_forward_x` each fails it; the exact-distribution tests failed too
+  on the two of these run against them.
+- `compare_noisy_builds.py --shots N` (best of 15 below 1000 shots), to
+  see per-run costs.
+
+**Why.** After 0.1.10 the frame work was half of the noisy time
+(conjugations 0.28 s + frame measurements 0.41 s of about 1.4 s on the
+100-qubit case), and Clifft, which keeps sign registers, was 1.6–3.4×
+faster on 9 of 10 cases. It is a published technique we lacked, it could be
+verified end to end (same counts for the same seed), and it removes work
+rather than speeding it up.
+
+**Measured** (4-vCPU VM, x86-64-v3 wheels for both builds).
+- Before/after, 5 interleaved rounds (`results/noisy_nearclifford_before_after.csv`):
+  0.24–0.77 best-of on the noisy cases (200 qubits 2.03 → 0.49 s on one
+  thread, 0.59 → 0.17 s on four; 100 qubits 1.06 → 0.54 s), 0.76 without
+  errors. One shot (`..._1shot.csv`): 0.64–0.78 on the noisy cases, 1.02 on
+  the circuit without errors (6 ms).
+- Against Clifft 0.13 (`results/noisy_nearclifford.csv`): Clifft faster on
+  8 of 10 by 1.15–1.94× (was 9 of 10 by 1.6–3.4×); Qevedo 4.1× faster at
+  200 qubits on 4 threads (0.20 s against 0.81 s) and 1.76× on one. Sweep,
+  100 qubits, one thread, p = 0 / 1e-5 / 1e-4 / 1e-3: 0.163 / 0.190 / 0.277
+  / 0.564 s against Clifft's 0.230 / 0.324 / 0.422 / 0.356 s.
+- Rust examples (`results/examples_before_after*.csv`): `bench`,
+  `pauliprop`, `stabilizer` byte-identical `.text` to 0.1.10 built with the
+  bumped version; the changed binaries over 60 rounds: medians 0.981–1.036,
+  and the 1.036 (`mps qft 100`) read 1.000 in another 60 rounds.
+- `cargo test --release` (native and `-C target-cpu=x86-64`), clippy in
+  both, pytest 147 passed.
+
+**Learned.**
+- The first version carried the virtual images of the insertions forwards
+  (one slot per insertion). Same rows, 0.25–0.93 at 10,000 shots, but 18–30
+  ms of fixed cost at 200 qubits and the dense pull-backs in `compile`:
+  one shot took 1.04–1.56× 0.1.10's time. Skipping not-yet-inserted slots,
+  a block transpose, parallel chunks and virtual checks carried backwards
+  did not fix it; the physical picture did.
+- A version bump alone changes every binary's `.text` (symbol hashes);
+  compare against the old sources with the version bumped.
+- 3–4% medians on unchanged hot code (`shots`, `mps`) came and went
+  between 60-round runs.
+
+**Next.**
+1. What a split-off shot still costs (its own dense state): profile first.
+2. One pass fewer per dense measurement.
+3. AVX-512 dense kernels behind runtime detection.
+
 ## 2026-11-10 — AVX2 dense kernels on the near-Clifford backend (0.1.10)
 
 **What.**

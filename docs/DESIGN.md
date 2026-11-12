@@ -672,6 +672,41 @@ streams, so the counts depend on the seed and not on the thread count.
 Noise does not change which qubits are active, so `peak_active_qubits`
 stays exact. Noiseless circuits do not take this path.
 
+**Sign registers** (since 0.1.11, `link` in `noisy.rs`). A shot's frame
+matters only through whether it anticommutes with each *check*: the
+virtual Pauli of a rotation (the sign of its angle) or of a measurement
+(a flip of its outcome). And `P_s` is a product of Paulis put in at known
+steps (errors at noise sites, `X_d` for a 50/50 outcome of 1, the X on a
+retired qubit reading 1, a reset's fix); only whether each one goes in
+depends on the shot. The conjugations that follow are the same in every
+shot and linear over GF(2), and so is the symplectic product with a
+check, so each insertion flips a fixed set of checks, its *row*. The
+program therefore keeps, per shot, one bit per check (its sign register,
+as Clifft keeps sign bits of its expressions) instead of frame words: an
+error XORs its row (a few words), a check reads one bit per shot, and the
+Clifford conjugations disappear from the run.
+
+The rows are found in the physical picture: conjugating by `C` turns frame
+Paulis into physical ones, and there a Pauli in the frame changes only
+with the physical Clifford gates (`G C P = (G C) P`), never with the
+Cliffords prepended to `C`. An error is then a one-qubit Pauli and a
+measurement's check is `Z_q`, where their virtual images span most
+virtual qubits. `rows` walks the program from the end with one slot per
+check (a `Group` of them): slot `k` takes the check's physical Pauli where
+the check is and is conjugated back through each earlier physical gate
+(on the symplectic part each gate is its own inverse); at an `X_q` error
+the slots with Z on `q` are its row, one column read. The X of a 50/50 or
+retired measurement is the one insertion that needs `C X_v C†`, read off
+the tableau's rows (`Tableau::push_forward_x`). Checks are few (212 on the
+200-qubit benchmark circuit, against 29,000 insertions), so this costs
+little, and `compile` no longer pulls back the image of every error: one
+shot takes 0.64-0.78 of 0.1.10's time on the noisy benchmark circuits
+(0.66 at 200 qubits). A first version
+carried the virtual images forwards, one slot per insertion: the same
+rows, 18-30 ms at 200 qubits, and one-shot runs 1.04-1.56× slower than
+0.1.10. A row is stored as (word, bits) pairs. The random draws are the
+same as before, so the counts for a seed did not change.
+
 Two earlier versions (timed with the same script on the same machine) are
 gone. The first gave every group its own copy of `C` and ran each group as
 its own task, repeating the Clifford work per shot. The second (0.1.8)
@@ -708,21 +743,20 @@ Z-type retirement is a copy and stays scalar.
 
 **Against Clifft** (`benchmarks/bench_noisy_nearclifford.py`, 4-vCPU VM,
 10,000 shots; random Clifford+T circuits with uniform depolarizing noise,
-the same circuit in both). Clifft is faster on all cases but one, by
-1.6-3.4×; at 200 qubits Qevedo is 1.10× faster on 4 threads and Clifft
-2.4× faster on one. Against 0.1.8, in paired runs on the same machine
+the same circuit in both). Clifft is faster on 8 of 10 cases, by
+1.15-1.94×; at 200 qubits Qevedo is 4.1× faster on 4 threads and 1.76×
+faster on one. Against 0.1.8, in paired runs on the same machine
 (`benchmarks/compare_noisy_builds.py`), 0.1.9 was 1.7-4.1× faster on every
-case, and the AVX2 kernels of 0.1.10 took 0.60-0.91 of 0.1.9's time on the
-noisy cases. On the 100-qubit circuit on one thread (`--sweep`,
-`results/noisy_nearclifford_sweep.csv`): 0.22 s against Clifft's 0.22 s
-without errors, 0.29 s against 0.35 s at p = 10⁻⁵, 0.42 s against 0.34 s at
-10⁻⁴, 1.19 s against 0.41 s at 10⁻³. What a split-off shot still costs
-here: frame words over all virtual qubits conjugated by every gathering
-and collapse Clifford (Clifft keeps a sign register per rotation and
-measurement; in the 0.1.9 profile of the 100-qubit case, conjugations and
-frame measurements took about 30% of the time), AVX2 rather than Clifft's
-AVX-512 kernels, and a second expectation pass when a group splits at a
-dense measurement.
+case; the AVX2 kernels of 0.1.10 took 0.60-0.91 of 0.1.9's time on the
+noisy cases, and the sign registers of 0.1.11 0.24-0.77 of 0.1.10's (0.24
+at 200 qubits on one thread, where the frames were widest). On the
+100-qubit circuit on one thread (`--sweep`,
+`results/noisy_nearclifford_sweep.csv`): 0.16 s against Clifft's 0.23 s
+without errors, 0.19 s against 0.32 s at p = 10⁻⁵, 0.28 s against 0.42 s at
+10⁻⁴, 0.56 s against 0.36 s at 10⁻³. What a split-off shot still costs
+here: its own dense state through every later rotation and measurement,
+AVX2 rather than Clifft's AVX-512 kernels, and a second expectation pass
+when a group splits at a dense measurement.
 
 **Correctness** (`tests/nearclifford.rs`, plus unit tests of the dense
 kernels):

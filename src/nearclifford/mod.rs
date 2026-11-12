@@ -914,23 +914,6 @@ impl Group {
         out
     }
 
-    /// Multiply the frames of the shots in `mask` by the virtual Pauli
-    /// `(x, z)`.
-    fn multiply(&mut self, mask: &[u64], x: &[u64], z: &[u64]) {
-        for v in set_bits(x) {
-            let r = self.column(v);
-            for (f, m) in self.x[r].iter_mut().zip(mask) {
-                *f ^= m;
-            }
-        }
-        for v in set_bits(z) {
-            let r = self.column(v);
-            for (f, m) in self.z[r].iter_mut().zip(mask) {
-                *f ^= m;
-            }
-        }
-    }
-
     /// Multiply the frame of shot `s` alone by the virtual Pauli `(x, z)`.
     fn multiply_shot(&mut self, s: usize, x: &[u64], z: &[u64]) {
         let (w, bit) = (s / 64, 1u64 << (s % 64));
