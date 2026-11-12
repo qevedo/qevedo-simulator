@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "qevedo-simulator"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "num-complex",
  "pyo3",
@@ -831,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "qvd"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "core_affinity",
  "faer",
