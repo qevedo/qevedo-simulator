@@ -364,6 +364,63 @@ fn noisy_sampling_matches_exact_distribution() {
 }
 
 #[test]
+fn errors_before_a_qubit_joins_the_dense_part_match_exact_distribution() {
+    // Every T here brings a new qubit into the dense part (the qubits start
+    // in X or Y eigenstates), and the errors just before it flip its sign in
+    // some shots: those shots take a Z on the new qubit into their frames
+    // instead of a dense part of their own, and that Z then flips later
+    // rotations and measurements. Against the exact distribution, at
+    // several error rates, including one where most shots are struck.
+    for (case, (px, py, pz)) in [(0.1, 0.0, 0.0), (0.2, 0.1, 0.05), (0.4, 0.3, 0.2)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut circuit = Circuit::new(3);
+        circuit.gate(Gate::H, &[0]);
+        circuit.gate(Gate::H, &[1]).gate(Gate::S, &[1]);
+        circuit.gate(Gate::SX, &[2]);
+        circuit.noise(qvd::Noise::Pauli1 { px, py, pz }, &[0, 1, 2]);
+        for q in 0..3 {
+            circuit.gate(Gate::T, &[q]);
+        }
+        circuit.cx(0, 1).cx(1, 2);
+        circuit.noise(qvd::Noise::Pauli1 { px, py, pz }, &[1]);
+        circuit
+            .gate(Gate::H, &[0])
+            .gate(Gate::T, &[0])
+            .gate(Gate::H, &[0]);
+        circuit
+            .gate(Gate::H, &[2])
+            .gate(Gate::Tdg, &[2])
+            .gate(Gate::SX, &[1]);
+        circuit.measure_all();
+        let shots = 100_000;
+        let options = Options {
+            backend: Backend::NearClifford,
+            seed: Some(31 + case as u64),
+            ..Options::default()
+        };
+        let result = qvd::run::<f64>(&circuit, shots, &options).unwrap();
+        assert_eq!(result.stats.peak_active_qubits, Some(3), "case {case}");
+        let exact = exact_distribution(&circuit);
+        for key in result.counts.keys() {
+            assert!(
+                exact.get(key).is_some_and(|&p| p > 1e-12),
+                "case {case}: impossible outcome {key}"
+            );
+        }
+        for (key, &p) in &exact {
+            let observed = *result.counts.get(key).unwrap_or(&0) as f64 / shots as f64;
+            let sigma = (p * (1.0 - p) / shots as f64).sqrt();
+            assert!(
+                (observed - p).abs() <= 5.0 * sigma + 3.0 / shots as f64,
+                "case {case} {key}: observed {observed}, exact {p}"
+            );
+        }
+    }
+}
+
+#[test]
 fn noise_on_a_wide_circuit_flips_at_the_right_rates() {
     // 150 qubits (frames of several words per qubit, many shots per word),
     // one after the other: H, T, a noise channel, T†, H, measure. Without

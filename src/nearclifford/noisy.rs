@@ -19,7 +19,9 @@
 //! - the Cliffords prepended to `C`, which conjugate every `P_s`;
 //! - a rotation `exp(-iθ/2 P')` on `φ_g`, which is `exp(+iθ/2 P')` in the
 //!   shots whose frame anticommutes with `P'`: a group with shots of both
-//!   kinds splits in two there;
+//!   kinds splits in two there, unless the rotation brings a new qubit into
+//!   the dense part (see [`Op::Rotate`]), where the minority instead takes
+//!   a Z on that qubit into its frame;
 //! - a measurement: fixed, 50/50 in the frame, or on the dense part, where
 //!   each shot's outcome is drawn from its group's `φ_g` and a group with
 //!   both outcomes splits;
@@ -84,11 +86,22 @@ enum Op<'a> {
     /// Conjugate every shot's frame by these Cliffords, which were
     /// prepended to `C` in this order.
     Conjugate(Vec<Clifford>),
-    /// `exp(-iθ/2 p)` on the dense part, which first grows by a qubit in
-    /// `|0>` if `grow`; `-θ` in the shots whose frame anticommutes with
-    /// `check`.
+    /// `exp(-iθ/2 p)` on the dense part; `-θ` in the shots whose frame
+    /// anticommutes with `check`.
+    ///
+    /// If `grown`, the dense part first grows by a qubit in `|0>`: the
+    /// virtual qubit `d`, whose Z after the rotation is the physical Pauli
+    /// given (`C Z_d C†`). Then the two signs need no split. `p` has X or
+    /// Y on the new position (that is why the qubit joined), so `Z_d`
+    /// anticommutes with it, and `Z_d` leaves the new qubit's `|0>` alone:
+    /// `exp(+iθ/2 p) φ|0> = Z_d exp(-iθ/2 p) Z_d φ|0> = Z_d exp(-iθ/2 p)
+    /// φ|0>`. A shot that needs the other sign is the group's state with
+    /// `Z_d` in its frame. In the benchmark circuits almost every rotation
+    /// is of this kind (the peak number of active qubits equals the T
+    /// count), so errors before a rotation no longer give the shots they
+    /// strike dense parts of their own.
     Rotate {
-        grow: bool,
+        grown: Option<(usize, Physical)>,
         p: Pauli,
         theta: f64,
         check: Check,
@@ -193,15 +206,23 @@ fn compile<'a>(
                         Step::Rotation(factors, theta) => {
                             let (dormant, pulled) = frame.gather_dormant(&factors);
                             conjugate(&mut frame, &mut ops);
-                            if let Some(d) = dormant {
+                            let grown = dormant.map(|d| {
                                 frame.active.push(d);
                                 frame.peak = frame.peak.max(frame.active.len());
-                            }
+                                let (x, z) = frame.frame.push_forward_z(d);
+                                (d, (gates.len(), x, z))
+                            });
                             let p = frame.on_positions(&pulled);
+                            debug_assert!(
+                                grown.is_none()
+                                    || frame.active.len() > 64
+                                    || p.x >> (frame.active.len() - 1) & 1 == 1,
+                                "a new qubit joins the dense part through an X part"
+                            );
                             // An identity is a global phase in every shot.
-                            if !p.is_identity() || dormant.is_some() {
+                            if !p.is_identity() || grown.is_some() {
                                 ops.push(Op::Rotate {
-                                    grow: dormant.is_some(),
+                                    grown,
                                     p,
                                     theta,
                                     check: (pulled.1, pulled.2),
@@ -344,9 +365,11 @@ type Row = Vec<(usize, u64)>;
 #[derive(Debug)]
 enum Act<'a> {
     /// As [`Op::Rotate`]: `-θ` in the shots whose register bit `check` is
-    /// set.
+    /// set. If the dense part grows first, `grown` is the row of the Z on
+    /// the new qubit, which the shots of the minority sign flip instead of
+    /// splitting off.
     Rotate {
-        grow: bool,
+        grown: Option<Row>,
         p: Pauli,
         theta: f64,
         check: usize,
@@ -417,6 +440,7 @@ fn link<'a>(ops: &[Op<'a>], gates: &[Clifford], n: usize) -> (Vec<Act<'a>>, usiz
     // which need every later check, replace the insertion numbers below.
     enum Pending<'a> {
         Act(Act<'a>),
+        Rotate(Pauli, f64, usize, Option<usize>),
         Frame(usize, usize, usize),
         Dense(usize, usize, Pauli, bool, usize),
         Reset(usize),
@@ -431,12 +455,17 @@ fn link<'a>(ops: &[Op<'a>], gates: &[Clifford], n: usize) -> (Vec<Act<'a>>, usiz
     for op in ops {
         pending.push(match op {
             Op::Conjugate(_) => continue,
-            &Op::Rotate { grow, p, theta, .. } => Pending::Act(Act::Rotate {
-                grow,
+            &Op::Rotate {
+                ref grown,
                 p,
                 theta,
-                check: count(&mut checks),
-            }),
+                ..
+            } => {
+                // The Z on the new qubit comes after the rotation's check.
+                let k = count(&mut checks);
+                let z = grown.as_ref().map(|_| count(&mut insertions));
+                Pending::Rotate(p, theta, k, z)
+            }
             &Op::MeasureFixed { clbit, fixed, .. } => Pending::Act(Act::MeasureFixed {
                 clbit,
                 check: count(&mut checks),
@@ -479,6 +508,12 @@ fn link<'a>(ops: &[Op<'a>], gates: &[Clifford], n: usize) -> (Vec<Act<'a>>, usiz
         .into_iter()
         .map(|p| match p {
             Pending::Act(act) => act,
+            Pending::Rotate(p, theta, check, z) => Act::Rotate {
+                grown: z.map(&mut take),
+                p,
+                theta,
+                check,
+            },
             Pending::Frame(clbit, check, i) => Act::MeasureFrame {
                 clbit,
                 check,
@@ -577,7 +612,15 @@ fn rows(ops: &[Op], gates: &[Clifford], n: usize, checks: usize, insertions: usi
     for op in ops.iter().rev() {
         match op {
             Op::Conjugate(_) | Op::Scratch => {}
-            Op::Rotate { physical, .. } | Op::MeasureFixed { physical, .. } => back.check(physical),
+            Op::Rotate {
+                physical, grown, ..
+            } => {
+                if let Some((_, z)) = grown {
+                    back.insertion(z);
+                }
+                back.check(physical);
+            }
+            Op::MeasureFixed { physical, .. } => back.check(physical),
             Op::MeasureFrame { physical, x_d, .. } => {
                 back.insertion(x_d);
                 back.check(physical);
@@ -805,16 +848,17 @@ fn run(acts: &[Act], dense: Arc<Dense>, group: Shots, peak: usize, seed: u64) ->
             };
             match &acts[pc] {
                 &Act::Rotate {
-                    grow,
+                    ref grown,
                     ref p,
                     theta,
                     check,
                 } => {
                     // Whether this group's shots see -θ; a group whose shots
                     // disagree splits, the smaller side leaving (sharing the
-                    // dense part until it rotates).
+                    // dense part until it rotates), unless the dense part
+                    // grows here.
                     let flipped = decided.take().unwrap_or_else(|| {
-                        if grow {
+                        if grown.is_some() {
                             Arc::make_mut(&mut dense).grow();
                         }
                         let flips = group.flips(check);
@@ -823,6 +867,18 @@ fn run(acts: &[Act], dense: Arc<Dense>, group: Shots, peak: usize, seed: u64) ->
                             return n_flipped != 0;
                         }
                         let leaving = 2 * n_flipped <= count;
+                        if let Some(row) = grown {
+                            // The whole group takes the majority's sign, and
+                            // the minority the Z on the new qubit, which
+                            // turns that sign into theirs (see `Op::Rotate`).
+                            let mask = if leaving {
+                                flips
+                            } else {
+                                and_not(&group.alive, &flips)
+                            };
+                            group.flip_all(&mask, row);
+                            return !leaving;
+                        }
                         let mask = if leaving {
                             flips
                         } else {
@@ -1020,9 +1076,15 @@ mod tests {
             for op in ops {
                 match op {
                     Op::Conjugate(cliffords) => cliffords.iter().for_each(|&g| frame.conjugate(g)),
-                    Op::Rotate { check: c, .. } | Op::MeasureFixed { check: c, .. } => {
-                        check(&frame, c, &mut k)
+                    Op::Rotate {
+                        check: c, grown, ..
+                    } => {
+                        check(&frame, c, &mut k);
+                        if let Some((d, _)) = grown {
+                            insert(&mut frame, &[], &x_on(*d));
+                        }
                     }
+                    Op::MeasureFixed { check: c, .. } => check(&frame, c, &mut k),
                     Op::MeasureFrame {
                         check: c,
                         collapse,
@@ -1079,7 +1141,10 @@ mod tests {
             match act {
                 Act::MeasureFrame { row, .. }
                 | Act::MeasureDense { row, .. }
-                | Act::ResetFix(row) => rows.push(bits(row)),
+                | Act::ResetFix(row)
+                | Act::Rotate {
+                    grown: Some(row), ..
+                } => rows.push(bits(row)),
                 Act::Noise { sites, .. } => {
                     for site in sites {
                         for (x, z) in &site.rows {
@@ -1101,7 +1166,7 @@ mod tests {
         // fixed, 50/50 or on the dense part, resets, and final measurements.
         // Over 70 qubits, so that the frames and registers take two words.
         let mut rng = Pcg64::seed_from_u64(5);
-        let mut measured = 0;
+        let (mut measured, mut grown) = (0, 0);
         for (case, n) in [5usize, 9, 70].into_iter().enumerate() {
             let mut circuit = Circuit::new(n);
             circuit.num_clbits = n + 8;
@@ -1143,9 +1208,16 @@ mod tests {
                     _ => false,
                 })
                 .count();
+            // So do the Zs on qubits that join the dense part at a rotation.
+            grown += acts
+                .iter()
+                .filter(
+                    |act| matches!(act, Act::Rotate { grown: Some(row), .. } if !row.is_empty()),
+                )
+                .count();
             // Over 64 checks, so that rows take two words.
             assert!(n < 64 || checks > 64, "case {case}");
         }
-        assert!(measured > 0);
+        assert!(measured > 0 && grown > 0);
     }
 }

@@ -1172,17 +1172,31 @@ impl Tableau {
     /// `X_v` anticommutes with `C† Z_q C` (the z bit `v` of that row) and Z
     /// on `q` where it anticommutes with `C† X_q C`.
     pub(crate) fn push_forward_x(&self, v: usize) -> (Vec<u64>, Vec<u64>) {
-        let z_bit = |row: usize| {
+        self.push_forward(v, &self.zs)
+    }
+
+    /// `C Z_v C†` for the virtual qubit `v`, without its sign, as
+    /// [`Tableau::push_forward_x`]: `Z_v` anticommutes with the rows that
+    /// have an x bit at `v`.
+    pub(crate) fn push_forward_z(&self, v: usize) -> (Vec<u64>, Vec<u64>) {
+        self.push_forward(v, &self.xs)
+    }
+
+    /// The image of the one-qubit Pauli on virtual qubit `v` that
+    /// anticommutes with exactly the rows whose bit `v` in `bits` (the x or
+    /// z half of the tableau) is set.
+    fn push_forward(&self, v: usize, bits: &[u64]) -> (Vec<u64>, Vec<u64>) {
+        let bit = |row: usize| {
             if self.columns {
-                self.zs[v * self.column_words + row / 64] >> (row % 64) & 1
+                bits[v * self.column_words + row / 64] >> (row % 64) & 1
             } else {
-                self.zs[row * self.words + v / 64] >> (v % 64) & 1
+                bits[row * self.words + v / 64] >> (v % 64) & 1
             }
         };
         let (mut xs, mut zs) = (vec![0u64; self.words], vec![0u64; self.words]);
         for q in 0..self.n {
-            xs[q / 64] |= z_bit(self.z_row(q)) << (q % 64);
-            zs[q / 64] |= z_bit(self.x_row(q)) << (q % 64);
+            xs[q / 64] |= bit(self.z_row(q)) << (q % 64);
+            zs[q / 64] |= bit(self.x_row(q)) << (q % 64);
         }
         (xs, zs)
     }

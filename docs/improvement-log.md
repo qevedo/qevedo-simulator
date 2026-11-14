@@ -7,6 +7,76 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-14 — No split where a rotation brings a new qubit into the dense part (0.1.12)
+
+**What.**
+- `nearclifford/noisy.rs`: at a rotation `exp(-iθ/2 P)` that first grows
+  the dense part by a dormant qubit `d` (in `|0>`, with X or Y of `P` on
+  it, which is why it joined), the shots whose sign register flips the
+  angle no longer split off with a dense state of their own. `Z_d`
+  anticommutes with `P` and fixes `|0>` on `d`, so
+  `exp(+iθ/2 P) φ|0> = Z_d exp(-iθ/2 P) φ|0>`: the group rotates with the
+  majority's sign and the minority XORs the row of `Z_d` into their
+  registers. `compile` records `C Z_d C†` (new `Tableau::push_forward_z`,
+  sharing a helper with `push_forward_x`) as a new kind of insertion after
+  the rotation's check (`Op::Rotate { grown }`); `link` and `rows` number
+  it and give it a row like the other insertions; `run` flips it instead
+  of calling `split_off`.
+- Tests: `errors_before_a_qubit_joins_the_dense_part_match_exact_distribution`
+  (3 qubits starting in X/Y eigenstates, Pauli errors before each T and
+  between later gates, three error rates up to 0.9 per site, against the
+  exact distribution at 100,000 shots); the register unit test now also
+  checks the new rows against frames carried one insertion at a time.
+  With the row flip removed, this test and three existing exact-distribution
+  tests fail.
+
+**Why.** Next item 1 asked to profile what a split-off shot costs and
+choose among a pass fewer per measurement, AVX-512 and fewer copies.
+Reading `run` first showed that most splits need not happen at all: in the
+benchmark circuits the peak number of active qubits equals the T count, so
+nearly every rotation grows the dense part, and every error before it that
+anticommutes with it split a shot off, after which that shot did all later
+dense work alone. Removing the split removes that work outright, which
+beats making it cheaper (kernels are already 2-4× faster than scalar; a
+pass fewer per measurement saves a fraction of a pass). The identity is
+exact, so nothing about the distributions changes. Clifft runs one shot
+at a time and has no groups to keep together; this is our own extension of
+its division of the state.
+
+**Measured** (4-vCPU VM, wheels for x86-64-v3, paired runs,
+`compare_noisy_builds.py`, 5 rounds):
+- Noisy cases 0.285-0.704 of 0.1.11's time best-of (0.292-0.700 median):
+  100 qubits p = 1e-3 0.614 → 0.180 s on one thread, 0.214 → 0.061 s on
+  4; 60 qubits p = 1e-2 0.316 → 0.102 s on one thread; 200 qubits 0.551 →
+  0.291 s. Sweep (100 qubits, one thread): 0.873 at 1e-5, 0.581 at 1e-4,
+  0.969 at p = 0. The time is now nearly flat in p (0.167-0.177 s from 0
+  to 1e-3).
+- Against Clifft 0.13 (`bench_noisy_nearclifford.py`): Qevedo faster on 8
+  of 10, by 1.40-6.35× (was slower on 8 of 10 by 1.15-1.94×); Clifft
+  still 1.07× (4 threads) and 1.15× (one) faster on 24 qubits.
+- One shot (`--shots 1`): 0.921-1.046 best-of; the 200-qubit case,
+  median 1.048 in 5 rounds, read 1.011/1.012 median over 20.
+- Agreement with Clifft at 200,000 shots: chi-square p 0.209, 0.896, 0.241;
+  largest |z| 2.34 and 2.43 over 24 and 60 qubits.
+- Noiseless: `bench`, `stabilizer`, `pauliprop`, `kernels`, `l2`,
+  `bandwidth` have byte-identical `.text` (both builds at version 0.1.12);
+  `shots`, `mps`, `nearclifford` over 15 interleaved rounds: medians
+  1.014, 1.028, 0.958, 1.019.
+
+**Learned.**
+- Look for splits that an exact identity removes before speeding up the
+  work a split causes: one `if` saved more than the AVX2 kernels did.
+- The register unit test with 70 qubits panics in a debug build
+  (`on_positions` shifts by ≥ 64 when the symbolic compile has more than
+  64 active qubits); it passes in release, which is how the suite runs. Not
+  caused by this change; noted in experiments.md.
+
+**Next.** Profile the now error-independent 0.17 s of the 100-qubit case
+(likely the final dense measurements' halving tree and its second
+expectation pass), then AVX-512 kernels; extend the no-split identity to
+rotations on qubits already in the dense part where a stabilizer of the
+group's state is known.
+
 ## 2026-11-12 — Sign registers instead of Pauli frames on the noisy near-Clifford path (0.1.11)
 
 **What.**

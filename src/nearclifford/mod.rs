@@ -36,10 +36,13 @@
 //! shots whose frame anticommutes with the measured Pauli. A rotation
 //! `exp(-iθ/2 P')` moves through `P_s` as `exp(+iθ/2 P')` where they
 //! anticommute, so those shots need their own dense state: a group of
-//! shots that share `C` and `φ` splits in two there, and only there. With
-//! few errors, most shots stay in one group and the dense work is done
-//! once for all of them; with many, the groups approach one per shot, which
-//! is Clifft's per-shot execution.
+//! shots that share `C` and `φ` splits in two there, and only there, unless
+//! the rotation brings a qubit in `|0>` into the dense part, where a Z on
+//! that qubit in the frame makes up for the sign (see `noisy::Op::Rotate`).
+//! With few errors, most shots stay in one group and the dense work is
+//! done once for all of them; with many errors and rotations on qubits
+//! already in the dense part, the groups approach one per shot, which is
+//! Clifft's per-shot execution.
 
 mod dense;
 mod noisy;

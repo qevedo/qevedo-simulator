@@ -646,7 +646,15 @@ shots of a group `g`, and `P_s` is the shot's own.
 - Clifford gates leave the frames alone (`G C P_s = (G C) P_s`); Cliffords
   prepended to `C` (gathering, collapses, retiring) conjugate them.
 - A rotation `exp(-iθ/2 P')` passes through `P_s` as `exp(+iθ/2 P')` where
-  the two anticommute, so a group with shots of both kinds splits there.
+  the two anticommute, so a group with shots of both kinds splits there,
+  with one exception (0.1.12). When the rotation brings a dormant qubit
+  `d` into the dense part, `d` is in `|0>` and `P'` has X or Y on it, so
+  `Z_d` anticommutes with `P'` and fixes `φ|0>`: `exp(+iθ/2 P') φ|0> =
+  Z_d exp(-iθ/2 P') φ|0>`. The whole group takes the majority's sign and
+  the minority puts `Z_d` into its frames (a row of sign bits, `C Z_d C†`
+  physically, from `Tableau::push_forward_z`). Nearly every rotation of a
+  Clifford+T circuit is of this kind until the dense part stops growing, so
+  groups then split only at dense measurements, by outcome.
 - A measurement draws each shot's outcome from its group's `φ_g` (flipped
   where `P_s` anticommutes with the measured Pauli) or, for a 50/50
   outcome that only changes the frame, puts it into `P_s` as `X_d`. A group
@@ -743,20 +751,23 @@ Z-type retirement is a copy and stays scalar.
 
 **Against Clifft** (`benchmarks/bench_noisy_nearclifford.py`, 4-vCPU VM,
 10,000 shots; random Clifford+T circuits with uniform depolarizing noise,
-the same circuit in both). Clifft is faster on 8 of 10 cases, by
-1.15-1.94×; at 200 qubits Qevedo is 4.1× faster on 4 threads and 1.76×
-faster on one. Against 0.1.8, in paired runs on the same machine
+the same circuit in both). Since 0.1.12 Qevedo is faster on 8 of 10 cases,
+by 1.40-6.35×, and Clifft on the 24-qubit circuit (1.07× on 4 threads,
+1.15× on one); 0.1.12 took 0.285-0.704 of 0.1.11's time on the noisy
+cases (paired runs). Against 0.1.8, in paired runs on the same machine
 (`benchmarks/compare_noisy_builds.py`), 0.1.9 was 1.7-4.1× faster on every
 case; the AVX2 kernels of 0.1.10 took 0.60-0.91 of 0.1.9's time on the
 noisy cases, and the sign registers of 0.1.11 0.24-0.77 of 0.1.10's (0.24
 at 200 qubits on one thread, where the frames were widest). On the
 100-qubit circuit on one thread (`--sweep`,
-`results/noisy_nearclifford_sweep.csv`): 0.16 s against Clifft's 0.23 s
-without errors, 0.19 s against 0.32 s at p = 10⁻⁵, 0.28 s against 0.42 s at
-10⁻⁴, 0.56 s against 0.36 s at 10⁻³. What a split-off shot still costs
-here: its own dense state through every later rotation and measurement,
-AVX2 rather than Clifft's AVX-512 kernels, and a second expectation pass
-when a group splits at a dense measurement.
+`results/noisy_nearclifford_sweep.csv`), 0.1.12: 0.170 s against Clifft's
+0.227 s without errors, 0.167 s against 0.346 s at p = 10⁻⁵, 0.177 s
+against 0.329 s at 10⁻⁴, 0.176 s against 0.349 s at 10⁻³ (0.1.11 took 0.56 s
+at 10⁻³). A shot still splits off at a rotation on qubits already in the
+dense part and at a dense measurement; what it then costs: its own dense
+state through every later step, AVX2 rather than Clifft's AVX-512
+kernels, and a second expectation pass when a group splits at a dense
+measurement.
 
 **Correctness** (`tests/nearclifford.rs`, plus unit tests of the dense
 kernels):
