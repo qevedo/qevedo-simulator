@@ -38,8 +38,8 @@ near-Clifford backend (a Clifford frame around a small dense state, after
 Clifft): a 200-qubit Clifford+T circuit with 20 T gates samples 1000 shots in
 0.11 s, where every Qiskit Aer method either takes over 10 minutes or
 does not support it. It samples Pauli noise as well, exactly, and is
-1.4–6.3× faster than Clifft on 8 of 10 noisy circuits; Clifft stays 1.07–1.15×
-faster on the smallest (details below). Expectation values of circuits far beyond any state
+1.2–16× faster than Clifft on all 10 noisy circuits of the benchmark
+(details below). Expectation values of circuits far beyond any state
 vector come from Pauli propagation: `<Z62>` of IBM's 127-qubit, 20-step
 kicked Ising "utility" circuit in 0.25–9.6 s, with the same result as IBM's
 pauli-prop and 14.6–117× faster than it end to end (5.0–15.7× faster than
@@ -386,16 +386,28 @@ with uniform depolarizing noise of strength p, the same circuit in both,
 
 | Circuit | p | Peak active qubits | Qevedo, 4 threads | Clifft, 4 threads | Qevedo, 1 thread | Clifft, 1 thread |
 |---|---|---|---|---|---|---|
-| 24 qubits, depth 20, 10 T | 0.001 | 10 | 0.0144 s | **0.0135 s** | 0.0372 s | **0.0323 s** |
-| 60 qubits, depth 20, 12 T | 0.001 | 12 | **0.040 s** | 0.056 s | **0.096 s** | 0.145 s |
-| 100 qubits, depth 30, 14 T | 0.001 | 14 | **0.061 s** | 0.164 s | **0.174 s** | 0.340 s |
-| 200 qubits, depth 40, 12 T | 0.001 | 12 | **0.118 s** | 0.749 s | **0.292 s** | 0.966 s |
-| 60 qubits, depth 20, 12 T | 0.01 | 12 | **0.043 s** | 0.074 s | **0.104 s** | 0.169 s |
+| 24 qubits, depth 20, 10 T | 0.001 | 10 | **0.0101 s** | 0.0118 s | **0.0130 s** | 0.0266 s |
+| 60 qubits, depth 20, 12 T | 0.001 | 12 | **0.0108 s** | 0.0471 s | **0.0190 s** | 0.1184 s |
+| 100 qubits, depth 30, 14 T | 0.001 | 14 | **0.0221 s** | 0.1609 s | **0.0301 s** | 0.3232 s |
+| 200 qubits, depth 40, 12 T | 0.001 | 12 | **0.0474 s** | 0.7633 s | **0.0624 s** | 0.8318 s |
+| 60 qubits, depth 20, 12 T | 0.01 | 12 | **0.0182 s** | 0.0492 s | **0.0310 s** | 0.1268 s |
 
-Qevedo is faster on 8 of the 10, by 1.40–6.35× (6.35× at 200 qubits on 4
-threads, 1.95× on 100 qubits on one); Clifft is faster on the 24-qubit
-circuit, by 1.07× on 4 threads and 1.15× on one, where a run takes
-milliseconds and fixed costs weigh most. Since 0.1.12 errors no longer
+Qevedo is faster on all 10, by 1.17–16.1× (16.1× at 200 qubits on 4
+threads, 10.7× on 100 qubits on one); the smallest lead is on the 24-qubit
+circuit on 4 threads (1.17×; 2.05× on one), where a run takes about 10 ms
+and fixed costs weigh most. Clifft was faster there until 0.1.13. Since
+0.1.13 a split of a group copies a few words per shot: the classical bits
+were columns over the shots, one vector per bit, and a split at a dense
+measurement (where the final measurements split groups down to single
+shots, tens of thousands of times per run) allocated and gathered two of
+them per classical bit, which took 95 of the 145 ms of the 100-qubit
+circuit. Each shot now keeps its sign bits and classical bits in one row.
+The noisy cases take 0.22–0.60 of 0.1.12's time in paired runs on the
+same machine (`benchmarks/compare_noisy_builds.py`,
+`results/noisy_nearclifford_before_after.csv`; 0.22 on 100 qubits at
+p = 10⁻³ on one thread), with the same counts for the same seed; one shot
+costs what it did (`results/noisy_nearclifford_before_after_1shot*.csv`,
+medians 0.95–1.02 over 20 rounds). Since 0.1.12 errors no longer
 split shots off at a rotation that brings a new qubit into the dense part
 (in these circuits, nearly every rotation: the peak number of active
 qubits equals the T count). That qubit is in `|0>`, the rotation's Pauli
@@ -403,11 +415,9 @@ has X or Y on it, and so a Z on it both leaves the dense state alone and
 turns the rotation's angle around: the shots that need the other sign keep
 the group's dense state and take that Z into their frames (their sign
 bits) instead. Groups then split only at measurements, by outcome, and
-the time hardly depends on the error rate any more: the noisy cases take
-0.29–0.70 of 0.1.11's time in paired runs on the same machine
-(`benchmarks/compare_noisy_builds.py`,
-`results/noisy_nearclifford_before_after.csv`; 0.29 on 100 qubits at
-p = 10⁻³, 0.32–0.36 at p = 10⁻²). Clifft runs one shot at a time, so it
+the time hardly depends on the error rate any more: the noisy cases took
+0.29–0.70 of 0.1.11's time in paired runs on the same machine (0.29 on
+100 qubits at p = 10⁻³, 0.32–0.36 at p = 10⁻²). Clifft runs one shot at a time, so it
 does each shot's dense work separately whatever the errors. Since 0.1.9 Qevedo
 compiles the shared frame's work once into a program and runs one group of
 shots at a time through it, as Clifft runs one shot at a time (1.7–4.1×
@@ -418,18 +428,18 @@ measurement) use AVX2, two amplitudes per register (1.1–1.7× faster than
 one sign bit per rotation and measurement, as Clifft does: which of those an
 error flips is worked out once per run, so an error costs a few word XORs
 and the frames' conjugations by every gathering and collapse Clifford are
-gone. The noisy cases take 0.24–0.77 of 0.1.10's time in paired runs on the
-same machine (`benchmarks/compare_noisy_builds.py`,
-`results/noisy_nearclifford_before_after.csv`), most at 200 qubits (2.03 →
+gone. The noisy cases took 0.24–0.77 of 0.1.10's time in paired runs on the
+same machine, most at 200 qubits (2.03 →
 0.49 s on one thread), where the frames were widest. The rows are found in
 the physical picture, where an error is a one-qubit Pauli, so compiling a
 run got cheaper too: one shot took 0.64–0.78 of 0.1.10's time (`--shots
-1`); 0.1.12 leaves that fixed cost where it was (0.92–1.05 of 0.1.11's,
-`results/noisy_nearclifford_before_after_1shot.csv`). On one thread,
-the 100-qubit circuit takes 0.170 s against Clifft's 0.227 s without
-errors, 0.167 s against 0.346 s at p = 10⁻⁵, 0.177 s against 0.329 s at
-10⁻⁴ and 0.176 s against 0.349 s at 10⁻³
-(`results/noisy_nearclifford_sweep.csv`); before 0.1.12 Clifft pulled
+1`), and 0.1.12 and 0.1.13 left it where it was. On one thread,
+the 100-qubit circuit takes 0.044 s against Clifft's 0.197 s without
+errors, 0.044 s against 0.314 s at p = 10⁻⁵, 0.038 s against 0.302 s at
+10⁻⁴ and 0.036 s against 0.253 s at 10⁻³
+(`results/noisy_nearclifford_sweep.csv`; best of 3 in one process, and
+the first case of the sweep, without errors, read slower than the paired
+runs, which give 0.026 s for it); before 0.1.12 Clifft pulled
 ahead at 10⁻³, where errors split most shots off and each split-off shot
 cost a dense state of its own. Clifft's kernels use AVX-512;
 Qevedo's x86-64 wheels use AVX2 (other builds, including ARM, the scalar
@@ -444,7 +454,9 @@ check sampled distributions against exact ones summed over every
 combination of errors, including a circuit whose errors strike just
 before each qubit joins the dense part. 0.1.12 splits groups less often,
 so it draws different random numbers from 0.1.11 and the counts for a seed
-differ. Noiseless circuits keep the
+differ; 0.1.13 gives exactly 0.1.12's counts for a seed (checked on 19
+cases, mid-circuit resets among them), so these agreement figures, measured
+with 0.1.12, stand. Noiseless circuits keep the
 counts of 0.1.5 to 0.1.8 for the same seed (checked against the 0.1.8
 wheel), and run faster: the 100-qubit, 24-T example of
 `compare_examples.py` took 0.41 s against 1.86 s.

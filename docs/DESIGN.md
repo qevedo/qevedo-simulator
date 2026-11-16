@@ -751,23 +751,39 @@ Z-type retirement is a copy and stays scalar.
 
 **Against Clifft** (`benchmarks/bench_noisy_nearclifford.py`, 4-vCPU VM,
 10,000 shots; random Clifford+T circuits with uniform depolarizing noise,
-the same circuit in both). Since 0.1.12 Qevedo is faster on 8 of 10 cases,
-by 1.40-6.35×, and Clifft on the 24-qubit circuit (1.07× on 4 threads,
-1.15× on one); 0.1.12 took 0.285-0.704 of 0.1.11's time on the noisy
-cases (paired runs). Against 0.1.8, in paired runs on the same machine
+the same circuit in both). Since 0.1.13 Qevedo is faster on all 10 cases,
+by 1.17-16.1× (1.17× on the 24-qubit circuit on 4 threads; Clifft was
+faster there until 0.1.12); 0.1.13 took 0.222-0.596 of 0.1.12's time on
+the noisy cases, and 0.1.12 0.285-0.704 of 0.1.11's (paired runs). Against 0.1.8, in paired runs on the same machine
 (`benchmarks/compare_noisy_builds.py`), 0.1.9 was 1.7-4.1× faster on every
 case; the AVX2 kernels of 0.1.10 took 0.60-0.91 of 0.1.9's time on the
 noisy cases, and the sign registers of 0.1.11 0.24-0.77 of 0.1.10's (0.24
 at 200 qubits on one thread, where the frames were widest). On the
 100-qubit circuit on one thread (`--sweep`,
-`results/noisy_nearclifford_sweep.csv`), 0.1.12: 0.170 s against Clifft's
-0.227 s without errors, 0.167 s against 0.346 s at p = 10⁻⁵, 0.177 s
-against 0.329 s at 10⁻⁴, 0.176 s against 0.349 s at 10⁻³ (0.1.11 took 0.56 s
-at 10⁻³). A shot still splits off at a rotation on qubits already in the
-dense part and at a dense measurement; what it then costs: its own dense
-state through every later step, AVX2 rather than Clifft's AVX-512
-kernels, and a second expectation pass when a group splits at a dense
-measurement.
+`results/noisy_nearclifford_sweep.csv`), 0.1.13: 0.044 s against Clifft's
+0.197 s without errors, 0.044 s against 0.314 s at p = 10⁻⁵, 0.038 s
+against 0.302 s at 10⁻⁴, 0.036 s against 0.253 s at 10⁻³ (0.1.12 took
+0.176 s at 10⁻³, 0.1.11 0.56 s). A shot still splits off at a rotation on
+qubits already in the dense part and at a dense measurement; what it then
+costs: its own dense state through every later step, AVX2 rather than
+Clifft's AVX-512 kernels, and a second expectation pass when a group
+splits at a dense measurement.
+
+**Shot rows** (0.1.13). Once the final measurements start, a group splits
+at nearly every dense measurement, by outcome, down to single shots:
+57,580 splits and single-shot measurements in a 10,000-shot run of the
+100-qubit circuit. Timers in `run` found 95 of its 145 ms in the
+bookkeeping of those splits, against 5 ms of expectations and 15 ms of
+retirements: the classical bits were columns over the shots, one `Vec`
+per bit, so a split allocated two vectors per classical bit (100 here),
+the leaving shots and the compacted staying ones, and gathered every
+column bit by bit. `Shots` now keeps one row per shot, its sign register
+then its classical bits then scratch bits for resets in progress; a split
+copies the leaving shots' rows (a few words each) and compacts the others
+in place. Writing an outcome costs a bit per shot instead of a word per 64
+shots, which the splits saved many times over. The draws are unchanged,
+so the counts for a seed are 0.1.12's; the noisy cases take 0.22-0.60 of
+its time.
 
 **Correctness** (`tests/nearclifford.rs`, plus unit tests of the dense
 kernels):

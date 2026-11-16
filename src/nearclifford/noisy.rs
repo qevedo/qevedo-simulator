@@ -667,6 +667,20 @@ pub(super) fn sample(
 ) -> Result<Vec<Leaf>, String> {
     let (ops, peak, gates) = compile(base, instructions)?;
     let (acts, checks) = link(&ops, &gates, base.n);
+    // The most resets in progress at once (each `Scratch` is closed by its
+    // `ResetFix` after the measurement in between, so at most one).
+    let scratch = acts
+        .iter()
+        .scan(0usize, |open, act| {
+            match act {
+                Act::Scratch => *open += 1,
+                Act::ResetFix(_) => *open -= 1,
+                _ => {}
+            }
+            Some(*open)
+        })
+        .max()
+        .unwrap_or(0);
     // At most a sixteenth of the shots in larger runs, so that batches
     // spread over the threads, and at least 256.
     let batch = shots.div_ceil(16).next_multiple_of(64).max(256);
@@ -679,7 +693,7 @@ pub(super) fn sample(
     let leaves = batches
         .into_par_iter()
         .map(|(shots, seed)| {
-            let group = Shots::new(checks, shots, clbits);
+            let group = Shots::new(checks, shots, clbits, scratch);
             run(&acts, base.dense.clone(), group, peak, seed)
         })
         .flatten_iter()
@@ -687,32 +701,48 @@ pub(super) fn sample(
     Ok(leaves)
 }
 
-/// The shots of a group: which are still in it, each one's sign register
-/// (one bit per check, [`link`]), and the record columns.
+/// The shots of a group: which are still in it, and one row of bits per
+/// slot holding the shot's sign register (one bit per check, [`link`]),
+/// its classical bits, and scratch bits for the outcomes of resets in
+/// progress.
+///
+/// Rows are shot-major, so that a split, which happens at almost every
+/// dense measurement once the final measurements start, copies a few words
+/// per shot. Classical bits used to be columns over the shots, one `Vec`
+/// per bit: a split of a group then allocated two vectors per classical
+/// bit (the leaving shots, and the staying ones compacted) and gathered
+/// every column bit by bit, which took 95 of the 145 ms of the 100-qubit
+/// benchmark circuit at 10,000 shots, against 20 ms of dense kernels.
 struct Shots {
     words: usize,
     alive: Vec<u64>,
-    /// Words per register.
+    /// Words per row.
     width: usize,
-    /// The registers, one after another, one per slot.
-    signs: Vec<u64>,
-    /// One column of shots per classical bit, then scratch columns for the
-    /// outcomes of resets in progress.
-    records: Vec<Vec<u64>>,
+    /// The rows, one after another, one per slot (`words * 64` of them).
+    rows: Vec<u64>,
+    /// The row bit of classical bit 0 (the number of checks); classical bit
+    /// `c` is bit `first + c`, and scratch bit `j` is bit `first + clbits +
+    /// j`.
+    first: usize,
+    clbits: usize,
+    /// Resets in progress: scratch bits in use.
+    scratch: usize,
 }
 
 impl Shots {
     /// `shots` (at least one) error-free shots with `clbits` classical bits
-    /// at 0.
-    fn new(checks: usize, shots: usize, clbits: usize) -> Shots {
+    /// at 0, and room for `scratch` resets in progress at once.
+    fn new(checks: usize, shots: usize, clbits: usize, scratch: usize) -> Shots {
         let words = shots.div_ceil(64);
-        let width = checks.div_ceil(64).max(1);
+        let width = (checks + clbits + scratch).div_ceil(64).max(1);
         Shots {
             words,
             alive: super::valid(shots),
             width,
-            signs: vec![0; words * 64 * width],
-            records: vec![vec![0; words]; clbits],
+            rows: vec![0; words * 64 * width],
+            first: checks,
+            clbits,
+            scratch: 0,
         }
     }
 
@@ -720,20 +750,39 @@ impl Shots {
         popcount(&self.alive)
     }
 
-    /// Per live shot, its register bit `k`: whether its frame anticommutes
-    /// with check `k`.
-    fn flips(&self, k: usize) -> Vec<u64> {
+    /// Per live shot, bit `k` of its row (for a check: whether its frame
+    /// anticommutes with it).
+    fn bits(&self, k: usize) -> Vec<u64> {
         let (w, b) = (k / 64, k % 64);
         let mut out = vec![0u64; self.words];
         for s in super::set_bits(&self.alive) {
-            out[s / 64] |= (self.signs[s * self.width + w] >> b & 1) << (s % 64);
+            out[s / 64] |= (self.rows[s * self.width + w] >> b & 1) << (s % 64);
         }
         out
     }
 
+    /// Set bit `k` of every live shot's row to that shot's bit in `bits`.
+    fn write(&mut self, k: usize, bits: &[u64]) {
+        let (w, b) = (k / 64, k % 64);
+        for s in super::set_bits(&self.alive) {
+            let word = &mut self.rows[s * self.width + w];
+            *word = *word & !(1 << b) | (bits[s / 64] >> (s % 64) & 1) << b;
+        }
+    }
+
+    /// The row bit of classical bit `clbit`, or of the newest scratch bit
+    /// for `usize::MAX`.
+    fn record(&self, clbit: usize) -> usize {
+        if clbit == usize::MAX {
+            self.first + self.clbits + self.scratch - 1
+        } else {
+            self.first + clbit
+        }
+    }
+
     /// Flip `row` in the register of shot `s`.
     fn flip(&mut self, s: usize, row: &Row) {
-        let register = &mut self.signs[s * self.width..(s + 1) * self.width];
+        let register = &mut self.rows[s * self.width..(s + 1) * self.width];
         for &(w, bits) in row {
             register[w] ^= bits;
         }
@@ -752,31 +801,35 @@ impl Shots {
     /// A compact copy of the shots in `mask` (which must be alive), in
     /// order.
     fn extract(&self, mask: &[u64]) -> Shots {
-        let chosen: Vec<usize> = super::set_bits(mask).collect();
-        let words = chosen.len().div_ceil(64);
-        let mut signs = vec![0u64; words * 64 * self.width];
-        for (i, &s) in chosen.iter().enumerate() {
-            signs[i * self.width..(i + 1) * self.width]
-                .copy_from_slice(&self.signs[s * self.width..(s + 1) * self.width]);
+        let count = popcount(mask);
+        let words = count.div_ceil(64);
+        let mut rows = Vec::with_capacity(words * 64 * self.width);
+        for s in super::set_bits(mask) {
+            rows.extend_from_slice(&self.rows[s * self.width..(s + 1) * self.width]);
         }
-        let records = self
-            .records
-            .iter()
-            .map(|column| {
-                let mut out = vec![0u64; words];
-                for (i, &s) in chosen.iter().enumerate() {
-                    out[i / 64] |= (column[s / 64] >> (s % 64) & 1) << (i % 64);
-                }
-                out
-            })
-            .collect();
+        rows.resize(words * 64 * self.width, 0);
         Shots {
             words,
-            alive: super::valid(chosen.len()),
-            width: self.width,
-            signs,
-            records,
+            alive: super::valid(count),
+            rows,
+            ..*self
         }
+    }
+
+    /// Move the live shots to the front, in order.
+    fn compact(&mut self) {
+        let width = self.width;
+        let mut count = 0;
+        for s in super::set_bits(&self.alive) {
+            if s != count {
+                self.rows
+                    .copy_within(s * width..(s + 1) * width, count * width);
+            }
+            count += 1;
+        }
+        self.words = count.div_ceil(64);
+        self.rows.truncate(self.words * 64 * width);
+        self.alive = super::valid(count);
     }
 
     /// As [`Group::split_off`].
@@ -786,7 +839,7 @@ impl Shots {
             *a &= !m;
         }
         if compact || (self.words > 1 && self.count() * 4 < self.words * 64 * 3) {
-            *self = self.extract(&self.alive.clone());
+            self.compact();
         }
         other
     }
@@ -795,10 +848,9 @@ impl Shots {
     fn leaves(&self, peak: usize) -> Vec<Leaf> {
         super::set_bits(&self.alive)
             .map(|s| {
-                let clbits = self
-                    .records
-                    .iter()
-                    .map(|column| column[s / 64] >> (s % 64) & 1 == 1)
+                let row = &self.rows[s * self.width..(s + 1) * self.width];
+                let clbits = (self.first..self.first + self.clbits)
+                    .map(|k| row[k / 64] >> (k % 64) & 1 == 1)
                     .collect();
                 (clbits, 1, peak)
             })
@@ -861,7 +913,7 @@ fn run(acts: &[Act], dense: Arc<Dense>, group: Shots, peak: usize, seed: u64) ->
                         if grown.is_some() {
                             Arc::make_mut(&mut dense).grow();
                         }
-                        let flips = group.flips(check);
+                        let flips = group.bits(check);
                         let (count, n_flipped) = (group.count(), popcount(&flips));
                         if n_flipped == 0 || n_flipped == count {
                             return n_flipped != 0;
@@ -898,27 +950,24 @@ fn run(acts: &[Act], dense: Arc<Dense>, group: Shots, peak: usize, seed: u64) ->
                     fixed,
                 } => {
                     let fixed = if fixed { u64::MAX } else { 0 };
-                    let flips = group.flips(check);
-                    *record(&mut group, clbit) = flips
-                        .iter()
-                        .zip(&group.alive)
-                        .map(|(f, a)| (f ^ fixed) & a)
-                        .collect();
+                    let outcomes: Vec<u64> = group.bits(check).iter().map(|f| f ^ fixed).collect();
+                    group.write(group.record(clbit), &outcomes);
                 }
                 &Act::MeasureFrame {
                     clbit,
                     check,
                     ref row,
                 } => {
-                    let flips = group.flips(check);
+                    let flips = group.bits(check);
                     let effective: Vec<u64> = group
                         .alive
                         .iter()
                         .map(|a| rng.random::<u64>() & a)
                         .collect();
                     group.flip_all(&effective, row);
-                    *record(&mut group, clbit) =
+                    let outcomes: Vec<u64> =
                         effective.iter().zip(&flips).map(|(e, f)| e ^ f).collect();
+                    group.write(group.record(clbit), &outcomes);
                 }
                 &Act::MeasureDense {
                     clbit,
@@ -932,13 +981,14 @@ fn run(acts: &[Act], dense: Arc<Dense>, group: Shots, peak: usize, seed: u64) ->
                     let outcome = decided.take().unwrap_or_else(|| {
                         // Draw each shot's effective outcome; a group with
                         // both splits, the shots of outcome 1 leaving.
-                        let flips = group.flips(check);
+                        let flips = group.bits(check);
                         let mut effective = vec![0u64; group.words];
                         for s in super::set_bits(&group.alive) {
                             effective[s / 64] |= ((rng.random::<f64>() < one) as u64) << (s % 64);
                         }
-                        *record(&mut group, clbit) =
+                        let outcomes: Vec<u64> =
                             effective.iter().zip(&flips).map(|(e, f)| e ^ f).collect();
+                        group.write(group.record(clbit), &outcomes);
                         let (count, n_ones) = (group.count(), popcount(&effective));
                         if n_ones == 0 || n_ones == count {
                             return n_ones != 0;
@@ -966,9 +1016,12 @@ fn run(acts: &[Act], dense: Arc<Dense>, group: Shots, peak: usize, seed: u64) ->
                         group.flip_all(&alive, row);
                     }
                 }
-                Act::Scratch => group.records.push(vec![0; group.words]),
+                // The reset's measurement writes the new scratch bit of every
+                // live shot, so it needs no clearing.
+                Act::Scratch => group.scratch += 1,
                 Act::ResetFix(row) => {
-                    let ones = group.records.pop().expect("the scratch column");
+                    let ones = group.bits(group.record(usize::MAX));
+                    group.scratch -= 1;
                     group.flip_all(&ones, row);
                 }
                 Act::Noise { p, sites } => noise(&mut group, &mut rng, *p, sites),
@@ -978,16 +1031,6 @@ fn run(acts: &[Act], dense: Arc<Dense>, group: Shots, peak: usize, seed: u64) ->
         leaves.extend(group.leaves(peak));
     }
     leaves
-}
-
-/// The record column `clbit`, or the newest scratch column for
-/// `usize::MAX`.
-fn record(group: &mut Shots, clbit: usize) -> &mut Vec<u64> {
-    if clbit == usize::MAX {
-        group.records.last_mut().expect("a scratch column")
-    } else {
-        &mut group.records[clbit]
-    }
 }
 
 /// A run of noise channels of probability `p` on every live shot of
@@ -1219,5 +1262,88 @@ mod tests {
             assert!(n < 64 || checks > 64, "case {case}");
         }
         assert!(measured > 0 && grown > 0);
+    }
+
+    #[test]
+    fn shot_rows_survive_splits_and_compaction() {
+        // Groups of random rows (sign bits, classical bits and a scratch
+        // bit spanning word boundaries), split by random masks with and
+        // without compaction, again and again: every shot keeps its row,
+        // in order, and the classical bits come out as written.
+        let mut rng = Pcg64::seed_from_u64(11);
+        for (checks, clbits, shots) in [(3usize, 5usize, 1usize), (60, 7, 70), (130, 100, 200)] {
+            let mut group = Shots::new(checks, shots, clbits, 1);
+            group.scratch = 1;
+            let bits = checks + clbits + 1;
+            // The reference: each shot's bits, by its original index.
+            let mut reference: Vec<Vec<bool>> = (0..shots)
+                .map(|_| (0..bits).map(|_| rng.random::<bool>()).collect())
+                .collect();
+            for k in 0..bits {
+                let column: Vec<u64> = (0..group.words)
+                    .map(|w| {
+                        (0..64)
+                            .filter(|b| w * 64 + b < shots && reference[w * 64 + b][k])
+                            .fold(0, |acc, b| acc | 1 << b)
+                    })
+                    .collect();
+                group.write(k, &column);
+            }
+            // Flip a row in some shots, as an error or a fix would.
+            let row: Row = vec![(0, 0b101), ((bits - 1) / 64, 1 << ((bits - 1) % 64))];
+            let mask: Vec<u64> = group
+                .alive
+                .iter()
+                .map(|a| rng.random::<u64>() & a)
+                .collect();
+            group.flip_all(&mask, &row);
+            for s in super::super::set_bits(&mask) {
+                for k in [0, 2, bits - 1] {
+                    reference[s][k] ^= true;
+                }
+            }
+            assert_eq!(group.record(usize::MAX), bits - 1);
+            // Split until single shots, each part checked against the
+            // reference rows of the shots it holds.
+            let mut stack = vec![(group, (0..shots).collect::<Vec<usize>>())];
+            while let Some((mut group, ids)) = stack.pop() {
+                let live: Vec<usize> = super::super::set_bits(&group.alive).collect();
+                assert_eq!(live.len(), ids.len());
+                for k in 0..bits {
+                    let column = group.bits(k);
+                    for (&slot, &id) in live.iter().zip(&ids) {
+                        assert_eq!(column[slot / 64] >> (slot % 64) & 1 == 1, reference[id][k]);
+                    }
+                }
+                let leaves = group.leaves(0);
+                for (leaf, &id) in leaves.iter().zip(&ids) {
+                    assert_eq!(leaf.0, reference[id][checks..checks + clbits]);
+                }
+                if ids.len() == 1 {
+                    continue;
+                }
+                let mask: Vec<u64> = group
+                    .alive
+                    .iter()
+                    .map(|a| rng.random::<u64>() & a)
+                    .collect();
+                let leaving = popcount(&mask);
+                if leaving == 0 || leaving == ids.len() {
+                    stack.push((group, ids));
+                    continue;
+                }
+                let (mut gone, mut kept) = (Vec::new(), Vec::new());
+                for (&slot, &id) in live.iter().zip(&ids) {
+                    if mask[slot / 64] >> (slot % 64) & 1 == 1 {
+                        gone.push(id);
+                    } else {
+                        kept.push(id);
+                    }
+                }
+                let other = group.split_off(&mask, rng.random::<bool>());
+                stack.push((other, gone));
+                stack.push((group, kept));
+            }
+        }
     }
 }

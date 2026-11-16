@@ -7,6 +7,75 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-16 — Shot-major rows for the noisy near-Clifford groups (0.1.13)
+
+**What.**
+- `nearclifford/noisy.rs`: `Shots` keeps one row of bits per shot slot:
+  the sign register (one bit per check), then the classical bits, then
+  scratch bits for resets in progress (as many as are ever open at once,
+  counted from the program; one here). Classical bits used to be columns
+  over the shots, `Vec<Vec<u64>>`, one vector per bit. A split now copies
+  the leaving shots' rows into a new group and compacts the staying shots
+  in place (`compact`), where it used to build both sides with
+  `extract`, allocating a vector per classical bit for each and gathering
+  every column bit by bit. Outcomes are written with `write` (a bit per
+  live shot), `bits` reads any row bit (checks and scratch alike), and a
+  reset's scratch column is a counter instead of a pushed vector.
+- Test: `shot_rows_survive_splits_and_compaction` (random rows spanning
+  word boundaries, flips, splits with and without compaction down to
+  single shots, leaves checked against a reference). Skipping the in-place
+  move in `compact` fails it and five exact-distribution tests in
+  `tests/nearclifford.rs`.
+
+**Why.** Next item 1 asked where the now error-independent ~0.17 s of the
+100-qubit case goes, guessing the final measurements' halving tree and its
+second expectation pass. Temporary timers per program step (10,000 shots,
+one thread, p = 0) showed 111 of 134 ms in dense measurements, and inside
+them 95 ms deciding and splitting, 15 ms retiring and 5 ms of
+expectations over 57,580 events: the bookkeeping, not the kernels. The
+final measurements split each 640-shot batch by outcome down to single
+shots, and every split allocated about 200 small vectors (100 classical
+bits, both sides). Removing that beats any kernel work: it is 2/3 of the
+time, and the change is a data layout with the same draws, so it is exact
+by construction and checkable by digests. Our own fix; no paper.
+
+**Measured** (4-vCPU VM, wheels for x86-64-v3, both builds at version
+0.1.13, `compare_noisy_builds.py`, 5 rounds):
+- Noisy cases 0.222-0.596 of 0.1.12's time best-of (0.271-0.596 median):
+  100 qubits p = 1e-3 0.149 → 0.033 s on one thread, 0.045 → 0.020 s on 4;
+  200 qubits 0.198 → 0.057 s on one; 24 qubits 0.022 → 0.009 s on one.
+  Sweep (100 qubits, one thread): 0.235 without errors, 0.265 at 1e-5,
+  0.267 at 1e-4.
+- Same counts for the same seed as 0.1.12 on 19 cases (24-200 qubits,
+  1/777/10,000 shots, 1 and 4 threads, a circuit with mid-circuit resets),
+  so the agreement with Clifft measured for 0.1.12 stands.
+- Against Clifft 0.13 (`bench_noisy_nearclifford.py`): faster on all 10,
+  by 1.17-16.1× (1.17× and 2.05× on 24 qubits, 4 threads and one; 10.7×
+  on 100 qubits on one; 16.1× on 200 qubits on 4). Sweep: 4.4-7.9× on one
+  thread (the first sweep case, p = 0, read 0.044 s in-process against
+  0.026 s in the paired runs).
+- One shot (`--shots 1`): 0.786-1.208 best-of in 5 rounds; the 24- and
+  100-qubit cases over 20 rounds: best-of 0.934-1.134, medians
+  0.952-1.023. Fixed costs unchanged.
+- Noiseless: `bench`, `stabilizer`, `pauliprop`, `kernels`, `l2`,
+  `bandwidth` byte-identical `.text`; `shots`, `mps` (two cases),
+  `nearclifford` over 15 rounds: best-of 0.938-1.062, medians
+  0.964-1.000; the 1.062 (`mps random`) over 40 rounds: 1.012 best-of,
+  0.989 median.
+- Tests: `cargo test --release` (all suites) and `pytest` (147) pass;
+  fmt and clippy (Rust 1.100) clean.
+
+**Learned.**
+- Profile before choosing among guessed bottlenecks: the guess (kernel
+  passes) was a seventh of the time; allocations were two thirds.
+- A split-heavy algorithm should keep per-shot state shot-major: a split
+  is then a row copy.
+
+**Next.** The remaining noisy time is mostly dense kernels and leaves:
+one pass fewer per dense measurement, or SymFT-style sampling of several
+dense measurements at once for small groups; the same rows on the
+noiseless `Group`; AVX-512 kernels.
+
 ## 2026-11-14 — No split where a rotation brings a new qubit into the dense part (0.1.12)
 
 **What.**

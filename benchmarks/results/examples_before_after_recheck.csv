@@ -1,5 +1,5 @@
 case,rounds,before_seconds,after_seconds,best_of_ratio,median_paired_ratio
-shots 24 qubits 1M shots,15,1.106,1.097,0.992,1.014
-mps random 100 depth 16 chi 128,15,4.192,4.08,0.973,1.028
-mps qft 100,15,0.062,0.057,0.919,0.958
-nearclifford 100 qubits 24 T,15,0.363,0.359,0.989,1.019
+shots 24 qubits 1M shots,15,0.896,0.869,0.970,0.990
+mps random 100 depth 16 chi 128,15,3.826,4.064,1.062,0.997
+mps qft 100,15,0.059,0.056,0.949,1.000
+nearclifford 100 qubits 24 T,15,0.288,0.27,0.938,0.964
