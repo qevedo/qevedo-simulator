@@ -1279,15 +1279,14 @@ mod tests {
             let mut reference: Vec<Vec<bool>> = (0..shots)
                 .map(|_| (0..bits).map(|_| rng.random::<bool>()).collect())
                 .collect();
-            for k in 0..bits {
-                let column: Vec<u64> = (0..group.words)
-                    .map(|w| {
-                        (0..64)
-                            .filter(|b| w * 64 + b < shots && reference[w * 64 + b][k])
-                            .fold(0, |acc, b| acc | 1 << b)
-                    })
-                    .collect();
-                group.write(k, &column);
+            let mut columns = vec![vec![0u64; group.words]; bits];
+            for (s, shot) in reference.iter().enumerate() {
+                for (column, &bit) in columns.iter_mut().zip(shot) {
+                    column[s / 64] |= (bit as u64) << (s % 64);
+                }
+            }
+            for (k, column) in columns.iter().enumerate() {
+                group.write(k, column);
             }
             // Flip a row in some shots, as an error or a fix would.
             let row: Row = vec![(0, 0b101), ((bits - 1) / 64, 1 << ((bits - 1) % 64))];
@@ -1309,10 +1308,10 @@ mod tests {
             while let Some((mut group, ids)) = stack.pop() {
                 let live: Vec<usize> = super::super::set_bits(&group.alive).collect();
                 assert_eq!(live.len(), ids.len());
-                for k in 0..bits {
-                    let column = group.bits(k);
-                    for (&slot, &id) in live.iter().zip(&ids) {
-                        assert_eq!(column[slot / 64] >> (slot % 64) & 1 == 1, reference[id][k]);
+                let columns: Vec<Vec<u64>> = (0..bits).map(|k| group.bits(k)).collect();
+                for (&slot, &id) in live.iter().zip(&ids) {
+                    for (column, &bit) in columns.iter().zip(&reference[id]) {
+                        assert_eq!(column[slot / 64] >> (slot % 64) & 1 == 1, bit);
                     }
                 }
                 let leaves = group.leaves(0);

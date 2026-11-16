@@ -143,6 +143,7 @@ what new fact would justify another attempt.
 
 ## Method lessons
 
+- **Run clippy after the last edit, tests included** (2026-11-16): clippy ran before the new unit test was written; CI's `needless_range_loop` then failed the feature commit and took a fix commit. Rerun `cargo clippy --release --all-targets -- -D warnings` right before committing.
 - **Time per operation kind before choosing a speed-up** (2026-11-16): `Instant` timers per `Act` kind plus finer ones inside `MeasureDense` (expectation / decide-and-split / retire) and an event count took two builds and 10 minutes, and overturned the guess in Next (kernels) in favour of allocations (1.65 µs of bookkeeping per split event against 0.35 µs of kernels).
 - **A layout change that keeps the draws is proved by digests first** (2026-11-16): `hashlib` digests of counts on 19 seeded cases (1, 777 and 10,000 shots, 1 and 4 threads, resets) were identical to 0.1.12 before any timing; a mutation (skipping the in-place compaction) failed the new unit test and five exact-distribution tests.
 - **1-shot runs under a millisecond read ±20% in 5 rounds** (2026-11-16): the 24-qubit 4-thread case read 1.208 best-of in 5 rounds and 0.934 over 20; recheck such readings with `--qubits N --rounds 20` before believing them.
