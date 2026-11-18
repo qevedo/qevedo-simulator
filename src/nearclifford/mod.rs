@@ -466,6 +466,31 @@ impl NearClifford {
         self.retire(p, eigenvalue, probability);
     }
 
+    /// [`NearClifford::probability_one`] for a measurement that acts on the
+    /// dense part, from its pulled-back Pauli (given by
+    /// [`NearClifford::gather_dormant`] with no dormant X part, the frame
+    /// unchanged since): the same value, without pulling the Pauli back
+    /// again. Each pull-back gathers a row of the column-major frame, one
+    /// bit per qubit, and a measurement in a group of shots did up to five.
+    fn dense_probability_one(&self, pulled: &Virtual) -> f64 {
+        debug_assert!(!self.symbolic);
+        let p = self.on_positions(pulled);
+        ((1.0 - self.dense.expectation(p)) / 2.0).clamp(0.0, 1.0)
+    }
+
+    /// [`NearClifford::collapse`] onto `outcome` for a measurement that acts
+    /// on the dense part, from its pulled-back Pauli (as in
+    /// [`NearClifford::dense_probability_one`]) and its probability `one`
+    /// of outcome 1.
+    fn collapse_dense(&mut self, pulled: &Virtual, outcome: bool, one: f64) {
+        let p = self.on_positions(pulled);
+        debug_assert!(!p.is_identity() && !self.symbolic);
+        let probability = if outcome { one } else { 1.0 - one };
+        assert!(probability > 0.0, "collapsing onto an impossible outcome");
+        self.cached = None;
+        self.retire(p, if outcome { -1.0 } else { 1.0 }, Some(probability));
+    }
+
     /// The dense part, copied first if another state shares it.
     fn dense_mut(&mut self) -> &mut Dense {
         Arc::make_mut(&mut self.dense)
@@ -519,17 +544,48 @@ impl NearClifford {
         let (gates, target, negative) = retire_plan(p);
         // φ is then an eigenstate of ±Z_target; X makes it +1.
         let one = (eigenvalue < 0.0) ^ negative;
-        for g in gates.into_iter().chain(one.then_some(Clifford::X(target))) {
-            self.prepend(self.virtual_gate(g));
-        }
         if let Some(probability) = probability {
             self.dense = Arc::new(
                 self.dense
                     .retired(p, eigenvalue, probability, one, Vec::new()),
             );
         }
+        self.retire_frame(gates, target, one);
+    }
+
+    /// The frame's part of [`NearClifford::retire`], once the dense part is
+    /// the new one: the plan's `gates` and, when `one`, an X on `target`
+    /// are prepended, and the qubit at `target` leaves the active ones.
+    fn retire_frame(&mut self, gates: Vec<Clifford>, target: usize, one: bool) {
+        for g in gates.into_iter().chain(one.then_some(Clifford::X(target))) {
+            self.prepend(self.virtual_gate(g));
+        }
         self.active.remove(target);
         debug_assert!(self.symbolic || self.dense.qubits() == self.active.len());
+    }
+
+    /// Both outcomes of a measurement that acts on the dense part, from its
+    /// pulled-back Pauli and probability `one` of outcome 1 (as in
+    /// [`NearClifford::collapse_dense`], both outcomes possible): this state
+    /// becomes the one after outcome 0, and the one after outcome 1 is
+    /// returned. The two new dense parts come from one pass over the
+    /// current one ([`Dense::retired_both`]).
+    fn split_dense(&mut self, pulled: &Virtual, one: f64) -> NearClifford {
+        let p = self.on_positions(pulled);
+        debug_assert!(!p.is_identity() && !self.symbolic);
+        assert!(
+            one > 0.0 && one < 1.0,
+            "collapsing onto an impossible outcome"
+        );
+        let (gates, target, negative) = retire_plan(p);
+        let (zero_dense, one_dense) = self.dense.retired_both(p, one, negative);
+        self.cached = None;
+        let mut other = self.clone();
+        self.dense = Arc::new(zero_dense);
+        other.dense = Arc::new(one_dense);
+        self.retire_frame(gates.clone(), target, negative);
+        other.retire_frame(gates, target, !negative);
+        other
     }
 
     /// A Clifford on positions as the same Clifford on the virtual qubits at
@@ -683,6 +739,75 @@ impl NearClifford {
             Kind::Dense
         }
     }
+
+    /// Which of the `pending` measurements (`(qubit, clbit)`) to do next,
+    /// and its kind: the first that acts on the dense part (each halves it
+    /// for everything after it), else the first with a fixed outcome (no
+    /// branching), else the first. The scan stops at the first dense one:
+    /// each [`NearClifford::kind`] pulls a Pauli back through the frame,
+    /// and classifying every pending measurement before each one made the
+    /// final measurements quadratic in their number (a third of the
+    /// noiseless 100-qubit example's sampling time at 10,000 shots, where
+    /// nearly every shot ends in a group of its own).
+    fn next_measurement(&self, pending: &[(usize, usize)]) -> (usize, Kind) {
+        let mut classifier = self.classifier();
+        let mut first: Option<(usize, Kind)> = None;
+        let mut fixed = None;
+        for (i, &(q, _)) in pending.iter().enumerate() {
+            let kind = classifier.kind(self, q);
+            match kind {
+                Kind::Dense => return (i, kind),
+                Kind::Fixed if fixed.is_none() => fixed = Some((i, kind)),
+                _ => {}
+            }
+            first.get_or_insert((i, kind));
+        }
+        fixed.or(first).expect("a pending measurement")
+    }
+
+    fn classifier(&self) -> Classifier {
+        let words = self.n.div_ceil(64);
+        let mut active = vec![0u64; words];
+        for &v in &self.active {
+            active[v / 64] |= 1 << (v % 64);
+        }
+        Classifier {
+            active,
+            x: vec![0; words],
+            z: vec![0; words],
+        }
+    }
+}
+
+/// Classifies Z measurements of one state as [`NearClifford::kind`] does,
+/// from the bits of the pulled-back Pauli alone, with the active qubits as
+/// a mask and buffers reused between measurements. `kind` (a pull-back with
+/// its sign and four allocations, and a search of the active list per set
+/// bit) took about 0.9 µs a call on the 100-qubit example; with this, the
+/// scan for the next measurement took 87 ms instead of 278 at 10,000
+/// shots on one thread (temporary timers, 2026-11-18).
+struct Classifier {
+    /// Bit `v` set when virtual qubit `v` is active.
+    active: Vec<u64>,
+    x: Vec<u64>,
+    z: Vec<u64>,
+}
+
+impl Classifier {
+    /// The kind of a Z measurement of qubit `q` in `state` (the state the
+    /// classifier was made for): 50/50 if `C† Z_q C` has an X or Y on a
+    /// dormant qubit, else dense if it acts on an active qubit, else fixed.
+    fn kind(&mut self, state: &NearClifford, q: usize) -> Kind {
+        state.frame.pull_back_z_bits(q, &mut self.x, &mut self.z);
+        let mut dense = false;
+        for ((&x, &z), &a) in self.x.iter().zip(&self.z).zip(&self.active) {
+            if x & !a != 0 {
+                return Kind::Frame;
+            }
+            dense |= (x | z) & a != 0;
+        }
+        if dense { Kind::Dense } else { Kind::Fixed }
+    }
 }
 
 /// Run `shots` shots of `pending` measurements (`(qubit, clbit)`, distinct
@@ -718,12 +843,7 @@ fn branch(
             // Dense measurements first (each halves the dense part), then
             // fixed ones (no branching), then 50/50 ones.
             let index = if state.active_qubits() > 0 {
-                let kinds: Vec<Kind> = pending.iter().map(|&(q, _)| state.kind(q)).collect();
-                kinds
-                    .iter()
-                    .position(|&k| k == Kind::Dense)
-                    .or_else(|| kinds.iter().position(|&k| k == Kind::Fixed))
-                    .unwrap_or(0)
+                state.next_measurement(&pending).0
             } else {
                 0
             };
@@ -821,9 +941,10 @@ struct Group {
     alive: Vec<u64>,
     x: Vec<u64>,
     z: Vec<u64>,
-    /// One column of shots per classical bit, then scratch columns for the
-    /// outcomes of resets in progress.
-    records: Vec<Vec<u64>>,
+    /// One column of shots per classical bit, all in one allocation
+    /// (column `c` at [`Group::column`]`(c)`): a split copies a group's
+    /// records with one allocation rather than one per classical bit.
+    records: Vec<u64>,
 }
 
 impl Group {
@@ -831,10 +952,10 @@ impl Group {
     fn new(qubits: usize, shots: usize, clbits: &[bool]) -> Group {
         let words = shots.div_ceil(64);
         let alive = valid(shots);
-        let records = clbits
-            .iter()
-            .map(|&b| if b { alive.clone() } else { vec![0; words] })
-            .collect();
+        let mut records = Vec::with_capacity(clbits.len() * words);
+        for &b in clbits {
+            records.extend(alive.iter().map(|&a| if b { a } else { 0 }));
+        }
         Group {
             words,
             alive,
@@ -933,31 +1054,30 @@ impl Group {
     fn extract(&self, mask: &[u64]) -> Group {
         let chosen: Vec<usize> = set_bits(mask).collect();
         let words = chosen.len().div_ceil(64);
-        let gather = |column: &[u64], out: &mut Vec<u64>| {
-            let start = out.len();
-            out.resize(start + words, 0);
-            for (i, &s) in chosen.iter().enumerate() {
-                out[start + i / 64] |= (column[s / 64] >> (s % 64) & 1) << (i % 64);
+        // Columns that are zero over the group stay zero, with no gather:
+        // without noise, frames only pick up bits at 50/50 measurements,
+        // after the dense part is gone, and record columns at their own
+        // measurement, so most columns are zero while the measurement tree
+        // splits groups.
+        let gather = |from: &[u64], to: &mut [u64]| {
+            for (column, out) in from
+                .chunks_exact(self.words)
+                .zip(to.chunks_exact_mut(words))
+            {
+                if column.iter().all(|&w| w == 0) {
+                    continue;
+                }
+                for (i, &s) in chosen.iter().enumerate() {
+                    out[i / 64] |= (column[s / 64] >> (s % 64) & 1) << (i % 64);
+                }
             }
         };
-        let qubits = self.qubits();
-        let (mut x, mut z) = (
-            Vec::with_capacity(qubits * words),
-            Vec::with_capacity(qubits * words),
-        );
-        for q in 0..qubits {
-            gather(&self.x[self.column(q)], &mut x);
-            gather(&self.z[self.column(q)], &mut z);
-        }
-        let records = self
-            .records
-            .iter()
-            .map(|column| {
-                let mut out = Vec::with_capacity(words);
-                gather(column, &mut out);
-                out
-            })
-            .collect();
+        let mut x = vec![0; self.qubits() * words];
+        let mut z = vec![0; self.qubits() * words];
+        let mut records = vec![0; self.records.len() / self.words * words];
+        gather(&self.x, &mut x);
+        gather(&self.z, &mut z);
+        gather(&self.records, &mut records);
         Group {
             words,
             alive: valid(chosen.len()),
@@ -971,8 +1091,9 @@ impl Group {
     fn leaves(&self, peak: usize) -> Vec<Leaf> {
         set_bits(&self.alive)
             .map(|s| {
-                let clbits = self.records[..]
-                    .iter()
+                let clbits = self
+                    .records
+                    .chunks_exact(self.words)
                     .map(|column| column[s / 64] >> (s % 64) & 1 == 1)
                     .collect();
                 (clbits, 1, peak)
@@ -1021,8 +1142,8 @@ fn sync(state: &mut NearClifford, group: &mut Group) {
     }
 }
 
-/// Measure qubit `q` in every shot of the group, writing the outcomes to
-/// record column `c`. Measurements with a fixed outcome, or a 50/50 one
+/// Measure qubit `q`, of kind `kind` in `state`, in every shot of the
+/// group, writing the outcomes to record column `c`. Measurements with a fixed outcome, or a 50/50 one
 /// that only changes the frame, are done once for all shots: per shot the
 /// outcome flips where its frame anticommutes with the measured Pauli, and
 /// a random 50/50 outcome goes into its frame. A measurement on the dense
@@ -1036,9 +1157,9 @@ fn measure_shots(
     group: &mut Group,
     q: usize,
     c: usize,
+    kind: Kind,
     rng: &mut Pcg64,
 ) -> Option<Split> {
-    let kind = state.kind(q);
     let (dormant, pulled) = state.gather_dormant(&[(q, 'Z')]);
     sync(state, group);
     let flips = group.anticommutes(&pulled.1, &pulled.2);
@@ -1049,11 +1170,14 @@ fn measure_shots(
             } else {
                 0
             };
-            group.records[c] = flips
-                .iter()
+            let column = group.column(c);
+            for ((r, f), a) in group.records[column]
+                .iter_mut()
+                .zip(&flips)
                 .zip(&group.alive)
-                .map(|(f, a)| (f ^ fixed) & a)
-                .collect();
+            {
+                *r = (f ^ fixed) & a;
+            }
             None
         }
         Kind::Frame => {
@@ -1071,11 +1195,16 @@ fn measure_shots(
             for (x, e) in group.x[column].iter_mut().zip(&effective) {
                 *x ^= e;
             }
-            group.records[c] = effective.iter().zip(&flips).map(|(e, f)| e ^ f).collect();
+            let column = group.column(c);
+            for ((r, e), f) in group.records[column].iter_mut().zip(&effective).zip(&flips) {
+                *r = e ^ f;
+            }
             None
         }
         Kind::Dense => {
-            let one = state.probability_one(q);
+            // No dormant X part, so `gather_dormant` left the frame alone
+            // and `pulled` stays valid through both collapses.
+            let one = state.dense_probability_one(&pulled);
             let effective: Vec<u64> = group
                 .alive
                 .iter()
@@ -1085,19 +1214,20 @@ fn measure_shots(
                     }) & a
                 })
                 .collect();
-            group.records[c] = effective.iter().zip(&flips).map(|(e, f)| e ^ f).collect();
+            let column = group.column(c);
+            for ((r, e), f) in group.records[column].iter_mut().zip(&effective).zip(&flips) {
+                *r = e ^ f;
+            }
             let ones: usize = effective.iter().map(|w| w.count_ones() as usize).sum();
             let count = group.count();
             if ones == 0 || ones == count {
-                state.collapse(q, ones == count);
+                state.collapse_dense(&pulled, ones == count, one);
                 sync(state, group);
                 return None;
             }
             let mut other_group = group.split_off(&effective, true);
-            let mut other = state.clone();
-            state.collapse(q, false);
+            let mut other = state.split_dense(&pulled, one);
             sync(state, group);
-            other.collapse(q, true);
             sync(&mut other, &mut other_group);
             let (seed0, seed1) = (rng.random::<u64>(), rng.random::<u64>());
             Some((other, other_group, seed1, seed0))
@@ -1123,15 +1253,10 @@ fn sample_frames(
     // to the shared frame must reach them.
     state.log.get_or_insert_with(Vec::new);
     while !pending.is_empty() {
-        let kinds: Vec<Kind> = pending.iter().map(|&(q, _)| state.kind(q)).collect();
-        let index = kinds
-            .iter()
-            .position(|&k| k == Kind::Dense)
-            .or_else(|| kinds.iter().position(|&k| k == Kind::Fixed))
-            .unwrap_or(0);
+        let (index, kind) = state.next_measurement(&pending);
         let (q, c) = pending.swap_remove(index);
         if let Some((other, other_group, seed, own_seed)) =
-            measure_shots(&mut state, &mut group, q, c, &mut rng)
+            measure_shots(&mut state, &mut group, q, c, kind, &mut rng)
         {
             let other_pending = pending.clone();
             let (mut leaves, more) = rayon::join(

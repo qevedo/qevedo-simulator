@@ -1166,6 +1166,26 @@ impl Tableau {
         ((exponent / 2) % 2 == 1, xs, zs)
     }
 
+    /// The x and z bits of `C† Z_q C` (without its sign) written into `xs`
+    /// and `zs` (`words` words each), with no allocation: the part of
+    /// [`Tableau::pull_back`] that classifying a measurement needs.
+    pub(crate) fn pull_back_z_bits(&self, q: usize, xs: &mut [u64], zs: &mut [u64]) {
+        let row = self.z_row(q);
+        if !self.columns {
+            let r = self.range(row);
+            xs.copy_from_slice(&self.xs[r.clone()]);
+            zs.copy_from_slice(&self.zs[r]);
+            return;
+        }
+        xs.fill(0);
+        zs.fill(0);
+        let (rw, rb) = (row / 64, row % 64);
+        for k in 0..self.n {
+            xs[k / 64] |= (self.xs[k * self.column_words + rw] >> rb & 1) << (k % 64);
+            zs[k / 64] |= (self.zs[k * self.column_words + rw] >> rb & 1) << (k % 64);
+        }
+    }
+
     /// `C X_v C†` for the virtual qubit `v`, without its sign: x and z bits
     /// over the physical qubits. The rows hold `C† X_q C` and `C† Z_q C`,
     /// and conjugation keeps commutation, so `C X_v C†` has X on `q` where

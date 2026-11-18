@@ -1,0 +1,2 @@
+case,rounds,before_seconds,after_seconds,best_of_ratio,median_paired_ratio
+shots 24 qubits 1M shots,40,0.836,0.842,1.007,0.996

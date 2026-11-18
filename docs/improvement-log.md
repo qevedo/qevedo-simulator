@@ -7,6 +7,83 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-18 — Fixed costs of the noiseless near-Clifford frames (0.1.14)
+
+**What.** In `nearclifford/mod.rs`, the final measurements of a noiseless
+run (per-shot Pauli frames, `sample_frames`):
+- `NearClifford::next_measurement` picks the next measurement (the first
+  that acts on the dense part, else the first fixed one, else the first)
+  and stops scanning at the first dense one. Both `sample_frames` and the
+  tree before them (`branch`) used to classify every pending measurement
+  before each one. A `Classifier` reads the pulled-back bits of `Z_q`
+  (`Tableau::pull_back_z_bits`, no allocation) against a mask of the
+  active qubits, and passes the kind on to `measure_shots`.
+- A dense measurement pulls its Pauli back once: `dense_probability_one`
+  and `collapse_dense` take the Pauli `measure_shots` already has, where
+  the probability and each collapse pulled it back again.
+- A split writes both outcomes' dense states in one pass
+  (`Dense::retired_both`, the AVX2 kernel `retired_x_into` with two
+  outputs, a one-pass Z-type gather; `NearClifford::split_dense`), where
+  each child's collapse read the parent. The amplitudes are computed
+  exactly as `retired` computes them.
+- `Group` keeps its classical bits in one allocation, and `extract` skips
+  columns that are zero over the group.
+- Tests: `retiring_both_outcomes_matches_retiring_each` (bit-for-bit
+  against two `retired` calls: every Pauli on 4-6 positions, and a
+  15-position state through the parallel ranges). Giving the outcome-1
+  state the outcome-0 X flag in `split_dense` fails
+  `sampling_matches_exact_distribution`.
+- `compare_examples.py` gained the 10,000- and 100,000-shot noiseless
+  near-Clifford cases.
+
+**Why.** Next item 2 suspected the noiseless `Group` of the bookkeeping
+that 0.1.13 removed from the noisy path. Timers on the 100-qubit 24-T
+example (10,000 shots, one thread, 1.45 s of sampling) showed that past a
+few hundred shots the groups split down to single shots: 98,423 dense
+measurements in 9,989 groups. The split's allocations were 0.16 s, but
+classifying every pending measurement before each one was 0.44 s, and
+the two collapses at each split 0.41 s (each reads the parent's dense
+state; near the root that is 2^23 amplitudes). Callgrind on an x86-64-v3
+build then showed the repeated pull-backs (rows gathered bit by bit from
+the column-major frame) and the gathers of non-zero frame columns. All of
+these keep the arithmetic and the draws, so they are exact by
+construction and checked by digests. Our own fixes; no paper.
+
+**Measured** (4-vCPU VM, binaries for x86-64-v3, both builds at version
+0.1.14, `compare_examples.py`, 15 rounds, 4 threads, times including the
+0.1 s of gates):
+- Noiseless 100-qubit 24-T example: 0.279 → 0.233 s at 1000 shots
+  (0.835 best-of, 0.843 median), 0.479 → 0.298 s at 10,000 (0.622,
+  0.630), 1.599 → 0.817 s at 100,000 (0.511, 0.526).
+- Same counts for the same seed as 0.1.13 on 84 cases (seven circuits of
+  12-100 qubits, two with mid-circuit measurements and resets; 1, 777 and
+  10,000 shots; 1 and 4 threads; two seeds).
+- Other examples: `bench`, `stabilizer`, `pauliprop`, `kernels`, `l2`,
+  `bandwidth` byte-identical `.text`; `shots` 0.964 best-of (0.989
+  median; an earlier run's 1.109 read 1.007 / 0.996 over 40 rounds),
+  `mps` 0.985 and 1.018 (1.004, 1.000).
+- Noisy cases (`compare_noisy_builds.py`, 20 rounds): best-of
+  0.934-1.188, medians 0.928-1.128 in no direction, on a VM whose A/A run
+  read 0.770-1.434; the 60-qubit cases over 40 rounds 0.971-1.017
+  best-of, 0.995-1.018 median. The noisy path's kernel keeps its source.
+- Tests: `cargo test --release` (all suites), the library and
+  near-Clifford suites also built for plain x86-64 (scalar kernels), and
+  `pytest` (147) pass; fmt and clippy (Rust 1.100) clean.
+
+**Learned.**
+- The guess was wrong again, and differently: profile first (as the
+  method lessons say), and count calls as well as time.
+- A dropped variant: one generic kernel for both paths. It may have cost
+  nothing, but the noisy readings were too noisy to tell, so the noisy
+  path keeps its own function.
+- Callgrind works on x86-64-v3 builds; it is the native AVX-512 build
+  that valgrind cannot run.
+
+**Next.** Page faults of fresh dense buffers (0.11 s of the 0.52 s at
+1000 shots on one thread); the rest of the fixed costs at 100,000 shots
+(frame prepends, row gathers, `extract`, malloc); one pass fewer per
+dense measurement.
+
 ## 2026-11-16 — Shot-major rows for the noisy near-Clifford groups (0.1.13)
 
 **What.**

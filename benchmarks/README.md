@@ -16,7 +16,7 @@ benchmarks/
 │   ├── output.csv              records and detection events into NumPy: Qevedo vs Stim
 │   ├── output_before_after.csv the same, two Qevedo builds interleaved (0.1.3 vs 0.1.4)
 │   ├── mpp*.csv                MPP toric-code memory with correlated errors: Qevedo vs Stim
-│   ├── examples_before_after*.csv the Rust examples, two builds interleaved (0.1.10 vs 0.1.11; the recheck files 0.1.12 vs 0.1.13 on the binaries that changed)
+│   ├── examples_before_after*.csv the Rust examples, two builds interleaved (0.1.10 vs 0.1.11; `_recheck` 0.1.13 vs 0.1.14 on the binaries that changed, `_shots_recheck` its 40-round rerun)
 │   ├── mps.csv                 matrix product states: Qevedo vs Qiskit Aer vs quimb
 │   ├── nearclifford.csv        Clifford+T circuits: Qevedo vs Qiskit Aer
 │   ├── noisy_nearclifford*.csv noisy Clifford+T circuits: Qevedo vs Clifft, and two Qevedo builds
@@ -175,41 +175,43 @@ symbol hashes and so the layout), so their cases, including readings up to
 1.069 best-of, are the VM's noise. `examples_before_after_mps_recheck.csv`
 reran the two `mps` cases of that comparison for 60 rounds: 0.987 and
 1.000 best-of, 1.001 and 1.000 median. `examples_before_after_recheck.csv`
-compares 0.1.12 with the build released as 0.1.13 (shot-major rows on the
-noisy near-Clifford path; only `nearclifford/noisy.rs` changed), both with
-the version 0.1.13: `bench`, `stabilizer`, `pauliprop`, `kernels`, `l2` and
-`bandwidth` have byte-identical `.text`, and the three timed binaries that
-differ (`shots`, `mps`, `nearclifford`; `quickstart` differs too and is
-not timed) ran 15 rounds: best-of 0.938-1.062, medians 0.964-1.000.
-`examples_before_after_mps_recheck.csv` reruns the case that read 1.062
-best-of (`mps random 100 depth 16 chi 128`) for 40 rounds: 1.012 best-of,
-0.989 median. (0.1.12 against 0.1.11 on the same four binaries: best-of
-0.919-0.992, medians 0.958-1.028.)
+compares 0.1.13 with the build released as 0.1.14 (fixed costs of the
+noiseless near-Clifford frames: `nearclifford/mod.rs`, a two-outcome
+retirement in `nearclifford/dense.rs` and `dense/avx2.rs`, one tableau
+function), both with the version 0.1.14 and built for x86-64-v3: `bench`,
+`stabilizer`, `pauliprop`, `kernels`, `l2` and `bandwidth` have
+byte-identical `.text`; of the binaries that differ, 15 rounds gave
+`shots` 0.964 best-of (0.989 median), `mps` 0.985 and 1.018 (1.004,
+1.000), and the noiseless 100-qubit 24-T `nearclifford` case 0.835 at
+1000 shots, 0.622 at 10,000 and 0.511 at 100,000 (medians 0.843, 0.630,
+0.526; the times include the 0.1 s of gates, on 4 threads). An earlier
+15-round run of the same comparison read `shots` 1.109 best-of (0.993
+median); `examples_before_after_shots_recheck.csv` reruns it for 40
+rounds: 1.007 best-of, 0.996 median. (0.1.13 against 0.1.12: best-of
+0.938-1.062, medians 0.964-1.000; `examples_before_after_mps_recheck.csv`
+reran its 1.062 for 40 rounds: 1.012 best-of, 0.989 median.)
 
 ## Noisy near-Clifford, before and after
 
 `compare_noisy_builds.py` times the circuits of `bench_noisy_nearclifford.py`
 (and three noise rates of its sweep) from two Python environments with the
 two builds installed, in alternation, 5 rounds, best of 3 per process.
-`noisy_nearclifford_before_after.csv` compares 0.1.12 with the build
-released as 0.1.13 (each shot's sign bits and classical bits in one row,
-so that a split copies a few words per shot instead of allocating and
-gathering two vectors per classical bit), both built for x86-64-v3 as the
-wheels are, on the 4-vCPU VM: the after / before ratio is 0.222-0.596
-best-of (0.271-0.596 median paired) on the ten noisy cases of the main
-table, 0.445 and 0.222 on the 100-qubit circuit at p = 10⁻³ (4 threads,
-one), 0.596 and 0.396 on 24 qubits; on the sweep, 0.235 without errors,
-0.265 at 10⁻⁵ and 0.267 at 10⁻⁴. The random draws are the same, and so
-are the counts for a seed (checked on 19 cases). `noisy_nearclifford_before_after_1shot.csv`
-(`--shots 1`, best of 15 per process) shows the fixed cost of a run:
-0.786-1.208 best-of, noise around 1 on runs of 0.6-30 ms;
-`noisy_nearclifford_before_after_1shot_recheck.csv` reruns the 24- and
-100-qubit cases (which read up to 1.208) for 20 rounds: best-of
-0.934-1.134, medians 0.952-1.023. `noisy_nearclifford_before_after_recheck.csv`
-is from an older comparison (0.1.9 with 0.1.10, the two 24-qubit cases
-with 25 rounds: 0.87 and 0.90 best-of). (0.1.12 against 0.1.11 was
-0.285-0.704; 0.1.11 against 0.1.10 0.24-0.77; 0.1.10 against 0.1.9
-0.60-0.91; 0.1.9 against 0.1.8 0.25-0.59.) `--qubits N` keeps only the
+`noisy_nearclifford_before_after.csv` compares 0.1.13 with the build
+released as 0.1.14, whose changes are on the noiseless path (the noisy
+path's kernels have the same source and its compile step the same logic), 20 rounds, both
+built for x86-64-v3 on the 4-vCPU VM: best-of 0.934-1.188, medians
+0.928-1.128, with no direction. The VM was noisy during this run: the
+same build against itself (5 rounds) read 0.770-1.434 best-of.
+`noisy_nearclifford_before_after_recheck.csv` reruns the 60-qubit cases,
+which read highest, for 40 rounds: best-of 0.971-1.017, medians
+0.995-1.018. Earlier comparisons, from the improvement log: 0.1.13
+against 0.1.12, 0.222-0.596 best-of (shot-major rows; same counts for a
+seed on 19 cases); `noisy_nearclifford_before_after_1shot.csv`
+(`--shots 1`, best of 15 per process, 0.1.12 against 0.1.13) 0.786-1.208,
+and `noisy_nearclifford_before_after_1shot_recheck.csv` its 24- and
+100-qubit cases for 20 rounds, 0.934-1.134 (medians 0.952-1.023). (0.1.12
+against 0.1.11 was 0.285-0.704; 0.1.11 against 0.1.10 0.24-0.77; 0.1.10
+against 0.1.9 0.60-0.91; 0.1.9 against 0.1.8 0.25-0.59.) `--qubits N` keeps only the
 cases of N qubits.
 
 ## Matrix product states

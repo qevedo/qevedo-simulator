@@ -33,6 +33,8 @@ def cases(stim_dir):
         ("mps random 100 depth 16 chi 128", ["mps", "random", "100", "16", "128", "1000"], r"total (\S+) s"),
         ("mps qft 100", ["mps", "qft", "100", "0", "256", "1000"], r"total (\S+) s"),
         ("nearclifford 100 qubits 24 T", ["nearclifford", "100", "30", "24", "1000"], r"total (\S+) s"),
+        ("nearclifford 100 qubits 24 T 10k shots", ["nearclifford", "100", "30", "24", "10000"], r"total (\S+) s"),
+        ("nearclifford 100 qubits 24 T 100k shots", ["nearclifford", "100", "30", "24", "100000"], r"total (\S+) s"),
         ("pauliprop 20 steps 0.2", ["pauliprop", "20", "0.2", "Z62", "1e-5"], r"(\S+) s on"),
         ("pauliprop 5 steps 1.2", ["pauliprop", "5", "1.2", "Z62", "1e-6"], r"(\S+) s on"),
         ("stabilizer d21", ["stabilizer", "surface", "21", "21", "10000"], r": (\S+) s \("),

@@ -1,3 +1,5 @@
-qubits,depth,t_count,p,threads,rounds,before_seconds,after_seconds,best_of_ratio,median_paired_ratio
-24,20,10,0.001,4,25,0.0215,0.0187,0.871,0.957
-24,20,10,0.001,1,25,0.0659,0.0590,0.895,0.864
+qubits,depth,t_count,p,shots,threads,rounds,before_seconds,after_seconds,best_of_ratio,median_paired_ratio
+60,20,12,0.001,10000,4,40,0.0103,0.0100,0.971,1.009
+60,20,12,0.001,10000,1,40,0.0164,0.0162,0.987,1.018
+60,20,12,0.01,10000,4,40,0.0116,0.0118,1.017,0.995
+60,20,12,0.01,10000,1,40,0.0234,0.0234,1.000,0.996

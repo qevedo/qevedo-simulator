@@ -467,6 +467,85 @@ impl Dense {
         Dense { amps: buffer }
     }
 
+    /// The states after both outcomes of measuring `p`, as
+    /// [`retired`](Self::retired) gives them (eigenvalue `+1` with
+    /// probability `1 - one`, then `-1` with probability `one`, both
+    /// nonzero; `negative` is the sign of the retirement plan's `±Z`, so
+    /// the `one` flags are `negative` and `!negative`), in one pass that
+    /// reads each amplitude once. A measurement that splits a group of shots
+    /// needs both, and each read of the parent state was a full pass over
+    /// memory near the root of the measurement tree, where the states are
+    /// largest. The amplitudes are computed exactly as `retired` computes
+    /// them, so sampling draws the same outcomes.
+    pub fn retired_both(&self, p: Pauli, one: f64, negative: bool) -> (Dense, Dense) {
+        let (zero, len) = (1.0 - one, self.amps.len());
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        ))]
+        if p.x != 0 && vectorized(len) {
+            let half = len / 2;
+            let (scale0, scale1) = ((0.5 / zero).sqrt(), (0.5 / one).sqrt());
+            let (m0, m1) = (p.phase() * 1.0 * scale0, p.phase() * -1.0 * scale1);
+            let (mut out0, mut out1) = (Vec::with_capacity(half), Vec::with_capacity(half));
+            let (from, to0, to1) = (
+                Shared(self.amps.as_ptr() as *mut C64),
+                Shared(out0.as_mut_ptr()),
+                Shared(out1.as_mut_ptr()),
+            );
+            // SAFETY: the ranges write disjoint parts of both reserved
+            // buffers, all of them, before their lengths are set.
+            unsafe {
+                ranges(half, |r| {
+                    avx2::retired_x_into(
+                        from.get(),
+                        p,
+                        [(m0, scale0, to0.get()), (m1, scale1, to1.get())],
+                        r,
+                    )
+                });
+                out0.set_len(half);
+                out1.set_len(half);
+            }
+            return (Dense { amps: out0 }, Dense { amps: out1 });
+        }
+        if p.x != 0 || len < 2 {
+            return (
+                self.retired(p, 1.0, zero, negative, Vec::new()),
+                self.retired(p, -1.0, one, !negative, Vec::new()),
+            );
+        }
+        // Z-type: outcome 0 keeps the amplitude whose bit `j` is `negative ^
+        // parity(z & a0)`, outcome 1 its partner across bit `j`.
+        let half = len / 2;
+        let j = p.z.trailing_zeros();
+        let low = (1usize << j) - 1;
+        let (scale0, scale1) = (1.0 / zero.sqrt(), 1.0 / one.sqrt());
+        let z = p.z as usize;
+        let amps = &self.amps;
+        let (mut out0, mut out1) = (Vec::with_capacity(half), Vec::with_capacity(half));
+        let (to0, to1) = (Shared(out0.as_mut_ptr()), Shared(out1.as_mut_ptr()));
+        let fill = |r: Range<usize>| {
+            for a in r {
+                let a0 = (a & low) | ((a & !low) << 1);
+                let bit = negative as usize ^ ((z & a0).count_ones() as usize & 1);
+                // SAFETY: `a < half`, and each index is written once.
+                unsafe {
+                    to0.get().add(a).write(amps[a0 | bit << j] * scale0);
+                    to1.get().add(a).write(amps[a0 | (bit ^ 1) << j] * scale1);
+                }
+            }
+        };
+        ranges(half, fill);
+        // SAFETY: `ranges` covered `0..half`.
+        unsafe {
+            out0.set_len(half);
+            out1.set_len(half);
+        }
+        (Dense { amps: out0 }, Dense { amps: out1 })
+    }
+
     /// Apply a one- or two-position Clifford.
     #[cfg(test)]
     pub fn apply(&mut self, gate: Gate) {
@@ -713,6 +792,55 @@ mod tests {
             }
         }
         assert_eq!(checked, 2 * 2 * (255 + 1023 + 4095));
+    }
+
+    /// `retired_both` gives exactly (bit for bit, so that sampling draws
+    /// the same outcomes) the two states of `retired` with eigenvalues `+1`
+    /// and `-1`: every Pauli on 4, 5 and 6 positions (scalar and AVX2
+    /// kernels), and Paulis on a 15-position state (parallel ranges), with
+    /// X parts from position 0 to 3 and Z-type ones.
+    #[test]
+    fn retiring_both_outcomes_matches_retiring_each() {
+        let check = |state: &Dense, p: Pauli| {
+            let one = ((1.0 - state.expectation(p)) / 2.0).clamp(0.0, 1.0);
+            if one <= 0.0 || one >= 1.0 {
+                return false;
+            }
+            let (_, _, negative) = super::super::retire_plan(p);
+            let (zero_state, one_state) = state.retired_both(p, one, negative);
+            let zero_alone = state.retired(p, 1.0, 1.0 - one, negative, Vec::new());
+            let one_alone = state.retired(p, -1.0, one, !negative, Vec::new());
+            assert_eq!(zero_state.amps, zero_alone.amps, "{p:?} outcome 0");
+            assert_eq!(one_state.amps, one_alone.amps, "{p:?} outcome 1");
+            true
+        };
+        let mut checked = 0;
+        for qubits in [4, 5, 6] {
+            for p in paulis(qubits) {
+                if p.is_identity() {
+                    continue;
+                }
+                let state = random_state(qubits, p.x * 41 + p.z * 5 + p.negative as u64);
+                checked += check(&state, p) as usize;
+            }
+        }
+        assert!(checked > 5000, "{checked}");
+        let state = random_state(15, 11);
+        for low in 0..4 {
+            for negative in [false, true] {
+                let z = 0b0101_1011_0110_0011;
+                let x = (0b0110_0101_1100_1000 << low) & 0x7fff | 1 << low;
+                assert!(check(&state, Pauli { x, z, negative }));
+                assert!(check(
+                    &state,
+                    Pauli {
+                        x: 0,
+                        z: z | 1 << low,
+                        negative
+                    }
+                ));
+            }
+        }
     }
 
     #[test]

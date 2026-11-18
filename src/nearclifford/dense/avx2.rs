@@ -295,3 +295,65 @@ pub(super) unsafe fn retired_x(
         }
     }
 }
+
+/// [`retired_x`] for several outputs at once, each with its own `(m,
+/// scale, out)`: the states after both outcomes of one measurement read
+/// each pair of amplitudes once (see [`Dense::retired_both`](super::Dense::retired_both)).
+/// The arithmetic per output is `retired_x`'s, so the amplitudes are the
+/// same bit for bit; `retired_x` stays separate so that the noisy path's
+/// kernel is unchanged.
+///
+/// # Safety
+/// As [`retired_x`], for every output.
+#[inline(always)]
+pub(super) unsafe fn retired_x_into<const N: usize>(
+    amps: *const C64,
+    p: Pauli,
+    outputs: [(C64, f64, *mut C64); N],
+    range: Range<usize>,
+) {
+    let x = p.x as usize;
+    let xh = x & !1;
+    let j = p.x.trailing_zeros();
+    let factors = outputs.map(|(m, scale, _)| (splat(scale), splat(m.re), splat(m.im)));
+    if j >= 1 {
+        let signs = table(p.z, j);
+        for kb in range.step_by(BLOCK) {
+            let base = insert(kb, j);
+            let high = both(parity(p.z, base ^ x));
+            for (h, &sign) in signs.iter().enumerate() {
+                let a0 = base | insert(2 * h, j);
+                // SAFETY: a0 + 1 and (a0 ^ x) + 1 are indices of the state,
+                // and kb + 2h + 1 of the new one.
+                unsafe {
+                    let a = load(amps, a0);
+                    let b = xor(load(amps, a0 ^ x), xor(sign, high));
+                    for (&(scale, m_re, m_im), &(_, _, out)) in factors.iter().zip(&outputs) {
+                        store(out, kb + 2 * h, fma(a, scale, cmul(b, m_re, m_im)));
+                    }
+                }
+            }
+        }
+    } else {
+        // The partners' indices are q ^ 1 and q ^ 3 with q = 2kb ^ xh ^ 4h.
+        let signs: [__m256d; BLOCK / 2] =
+            std::array::from_fn(|h| pair(parity(p.z, (4 * h) ^ 1), parity(p.z, (4 * h) ^ 3)));
+        for kb in range.step_by(BLOCK) {
+            let q_base = (2 * kb) ^ xh;
+            let high = both(parity(p.z, q_base));
+            for (h, &sign) in signs.iter().enumerate() {
+                let (i, q) = (2 * kb + 4 * h, q_base ^ (4 * h));
+                // SAFETY: i + 3, q + 1 and (q ^ 2) + 1 (q is even) are
+                // indices of the full state, and kb + 2h + 1 of the new one.
+                unsafe {
+                    let a = _mm256_permute2f128_pd(load(amps, i), load(amps, i + 2), 0x20);
+                    let b = _mm256_permute2f128_pd(load(amps, q), load(amps, q ^ 2), 0x31);
+                    let b = xor(b, xor(sign, high));
+                    for (&(scale, m_re, m_im), &(_, _, out)) in factors.iter().zip(&outputs) {
+                        store(out, kb + 2 * h, fma(a, scale, cmul(b, m_re, m_im)));
+                    }
+                }
+            }
+        }
+    }
+}

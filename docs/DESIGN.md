@@ -632,6 +632,26 @@ depends on measurement outcomes: `nearclifford::peak_active_qubits`.
 On 100 qubits with 23 active, 1000 shots took 214 s shot by shot, 38 s with
 the tree alone and 1.3 s with the frames.
 
+**Fixed costs of the noiseless frames** (0.1.14). Past a few hundred shots
+the groups split by outcome down to single shots, so a 10,000-shot run of
+that circuit does about 98,000 dense measurements, nearly all in groups of
+one, and their fixed costs outweighed the kernels:
+- the next measurement is the first pending one that acts on `φ` (then the
+  first fixed one): `next_measurement` stops scanning at it, where every
+  pending measurement was classified before each one (about three
+  classifications per measurement instead of up to a hundred), and a
+  `Classifier` reads the pulled-back bits against a mask of the active
+  qubits without allocating;
+- a dense measurement pulls its Pauli back once (`dense_probability_one`,
+  `collapse_dense`), where the probability and each collapse pulled it back
+  again (a row gathered bit by bit from the column-major frame);
+- a split writes both outcomes' states in one pass over the parent
+  (`Dense::retired_both`, `split_dense`), where each collapse read the
+  parent, which near the root of the tree is the full state;
+- a group's classical bits are one allocation, and columns that are zero
+  over the group are not gathered at a split.
+The arithmetic is unchanged, so the counts for a seed are those of 0.1.13.
+
 **Noise** (`nearclifford/noisy.rs`). Pauli channels (all of `Noise`) use
 per-shot Pauli frames from the first channel on, as Clifft's virtual Pauli
 frame does. Each shot is in the state `C P_s (φ_g ⊗ |0...0>)`: the frame `C`
