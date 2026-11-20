@@ -7,6 +7,72 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-20 — Nothing shipped: buffer reuse and one-pass classification on the noiseless frames
+
+**What was tried.** Two changes to the noiseless near-Clifford sampler
+(`nearclifford/mod.rs`, `dense.rs`, `stabilizer/tableau.rs`), both built,
+tested (the existing suite plus new unit tests) and measured, both
+dropped. No commit touches code; this entry and `experiments.md` record
+them.
+
+1. **Next item 1, the page faults of fresh dense buffers.** Every
+   retirement allocates its output; the 100-qubit 24-T example at 1000
+   shots, one thread, took 148k minor faults against 65k at one shot.
+   - A spare buffer per state (the replaced dense part, cleared and shrunk
+     to the next output size; the outcome-0 side of a split keeps the
+     parent's, clones get none): faults *rose* to 211k and sampling went
+     0.509 → 0.571 s (10,000 shots 0.700 → 0.854 s). glibc raises its
+     mmap threshold (up to 32 MB) only when `free` returns a mapped block;
+     a `realloc` that shrinks one with `mremap` does not, so later
+     allocations stayed fresh mappings.
+   - The same without shrinking: 148k → 129k faults, times within noise,
+     peak RSS 261 → 324 MB on one thread and 260 → 503 MB on four.
+   - A pool shared by one run's tree (best fit, buffers below 128 KB left
+     to malloc, freed with the last state): 148k → 82k faults. Over 10
+     interleaved rounds, medians against 0.1.14: 1000 shots 0.868 (one
+     thread) / 0.943 (four); 10,000 shots 0.942 / 0.921; 100,000 shots
+     0.988 / 0.991. Peak RSS 324 MB on one thread and 444-464 MB on four.
+     Fitting buffers to within 2× of the need and evicting the largest
+     over a cap of the largest buffer: RSS 324 / 377-390 MB, but no gain
+     (0.953-1.102); a cap of half: 0.975-1.059.
+
+   The faults are at the top of the tree, where buffers are 32 MB or more
+   (mapped by glibc whatever the threshold): each level writes as much as
+   the root state, and a sibling subtree can only reuse those pages if they
+   stay resident. The speed came from handing large buffers to small
+   states, and paid for it in peak memory, which also lowers the largest
+   state that fits.
+
+2. **Next item 2, classifying the pending measurements.** Counters showed
+   191,727 `next_measurement` calls and 475,048 classifications at 20,000
+   shots (298,781 50/50, 176,267 dense, no fixed ones; the dense part never
+   empties before the last measurement), about 2,800 instructions each
+   (callgrind: 1.34e9 of 7.69e9). Classifying every qubit in one pass over
+   the column-major frame (`Tableau::z_rows_touching`: OR of the dormant
+   columns' x words and of the active columns' x|z words, over the words
+   that hold the Z rows) picked the same measurements (a new test against
+   one pull-back per qubit, in both frame layouts), but the pass reads
+   2 × 3 × 100 words, three rows' worth, while the scan read 2.5 rows a
+   call on average. `next_measurement` took 1.80e9, 1.45e9 and 1.64e9
+   instructions over three versions; 100,000 shots ran 1.06× slower.
+
+**Also ruled out.** Next item 14 (the shift overflow in `on_positions`
+past 64 active qubits) matters only in debug builds: a wrapped shift sets
+some bit, so it never turns a non-identity Pauli into the identity, and a
+state with more than 64 active qubits cannot run anyway.
+
+**Learned.** Before building a pass that answers many queries at once,
+count the words it reads against the words the per-query path reads
+times the queries it actually makes. For memory reuse, record peak RSS on
+one and four threads next to the faults and times. `/usr/bin/time` is not
+on the VM; `resource.getrusage(RUSAGE_CHILDREN)` from Python gives faults,
+user and system time and peak RSS.
+
+**Next.** Allocations per measurement (malloc, free and calloc are 0.78e9
+of the 7.69e9 instructions at 20,000 shots), `Group::extract` (1.22e9),
+and the row gathers of the column-major frame (`Tableau::row` 0.67e9 plus
+those inside the classification).
+
 ## 2026-11-18 — Fixed costs of the noiseless near-Clifford frames (0.1.14)
 
 **What.** In `nearclifford/mod.rs`, the final measurements of a noiseless
