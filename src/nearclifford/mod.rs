@@ -629,7 +629,10 @@ impl NearClifford {
 /// negative. Depends only on `p`, so groups of shots that share the frame
 /// share the plan.
 fn retire_plan(mut p: Pauli) -> (Vec<Clifford>, usize, bool) {
-    let mut gates = Vec::new();
+    // Room for both stages in the usual case (one gate per position the
+    // Pauli touches in each, plus S and H), so the list is allocated once
+    // rather than grown a few times per measurement.
+    let mut gates = Vec::with_capacity(2 * (p.x | p.z).count_ones() as usize + 2);
     let target = if p.x != 0 {
         let j = p.x.trailing_zeros() as usize;
         if p.z >> j & 1 == 1 {
@@ -651,18 +654,17 @@ fn retire_plan(mut p: Pauli) -> (Vec<Clifford>, usize, bool) {
     }
     if p.x != 0 {
         // Clear the Z parts left next to the X on `target`.
-        let mut more = Vec::new();
+        let first = gates.len();
         for i in set_positions(p.z & !(1 << target)) {
-            more.push(Clifford::CZ(target, i));
+            gates.push(Clifford::CZ(target, i));
         }
         if p.z >> target & 1 == 1 {
-            more.push(Clifford::S(target));
+            gates.push(Clifford::S(target));
         }
-        more.push(Clifford::H(target));
-        for &g in &more {
+        gates.push(Clifford::H(target));
+        for &g in &gates[first..] {
             conjugate(&mut p, g);
         }
-        gates.extend(more);
     }
     debug_assert_eq!(
         (p.x, p.z),
@@ -672,8 +674,14 @@ fn retire_plan(mut p: Pauli) -> (Vec<Clifford>, usize, bool) {
     (gates, target, p.negative)
 }
 
-fn set_positions(mask: u64) -> impl Iterator<Item = usize> {
-    (0..64).filter(move |&i| mask >> i & 1 == 1)
+/// The set bits of `mask`, lowest first, one `trailing_zeros` each rather
+/// than a test of all 64 positions.
+fn set_positions(mut mask: u64) -> impl Iterator<Item = usize> {
+    std::iter::from_fn(move || {
+        let i = mask.trailing_zeros() as usize;
+        mask &= mask.wrapping_sub(1);
+        (i < 64).then_some(i)
+    })
 }
 
 /// `P -> G† P G` on positions.
@@ -749,8 +757,16 @@ impl NearClifford {
     /// final measurements quadratic in their number (a third of the
     /// noiseless 100-qubit example's sampling time at 10,000 shots, where
     /// nearly every shot ends in a group of its own).
-    fn next_measurement(&self, pending: &[(usize, usize)]) -> (usize, Kind) {
-        let mut classifier = self.classifier();
+    ///
+    /// `classifier` is any [`Classifier`] for this many qubits: it is set
+    /// to this state's active qubits here, so one per measurement tree
+    /// branch serves every call.
+    fn next_measurement(
+        &self,
+        pending: &[(usize, usize)],
+        classifier: &mut Classifier,
+    ) -> (usize, Kind) {
+        classifier.set_active(self);
         let mut first: Option<(usize, Kind)> = None;
         let mut fixed = None;
         for (i, &(q, _)) in pending.iter().enumerate() {
@@ -764,19 +780,6 @@ impl NearClifford {
         }
         fixed.or(first).expect("a pending measurement")
     }
-
-    fn classifier(&self) -> Classifier {
-        let words = self.n.div_ceil(64);
-        let mut active = vec![0u64; words];
-        for &v in &self.active {
-            active[v / 64] |= 1 << (v % 64);
-        }
-        Classifier {
-            active,
-            x: vec![0; words],
-            z: vec![0; words],
-        }
-    }
 }
 
 /// Classifies Z measurements of one state as [`NearClifford::kind`] does,
@@ -785,7 +788,9 @@ impl NearClifford {
 /// its sign and four allocations, and a search of the active list per set
 /// bit) took about 0.9 µs a call on the 100-qubit example; with this, the
 /// scan for the next measurement took 87 ms instead of 278 at 10,000
-/// shots on one thread (temporary timers, 2026-11-18).
+/// shots on one thread (temporary timers, 2026-11-18). One classifier
+/// serves a whole branch of [`sample_frames`] (made once, its mask reset
+/// per call) rather than three allocations per measurement.
 struct Classifier {
     /// Bit `v` set when virtual qubit `v` is active.
     active: Vec<u64>,
@@ -794,6 +799,24 @@ struct Classifier {
 }
 
 impl Classifier {
+    /// A classifier for states of `n` qubits.
+    fn new(n: usize) -> Classifier {
+        let words = n.div_ceil(64);
+        Classifier {
+            active: vec![0; words],
+            x: vec![0; words],
+            z: vec![0; words],
+        }
+    }
+
+    /// Take `state`'s active qubits as the mask.
+    fn set_active(&mut self, state: &NearClifford) {
+        self.active.fill(0);
+        for &v in &state.active {
+            self.active[v / 64] |= 1 << (v % 64);
+        }
+    }
+
     /// The kind of a Z measurement of qubit `q` in `state` (the state the
     /// classifier was made for): 50/50 if `C† Z_q C` has an X or Y on a
     /// dormant qubit, else dense if it acts on an active qubit, else fixed.
@@ -843,7 +866,9 @@ fn branch(
             // Dense measurements first (each halves the dense part), then
             // fixed ones (no branching), then 50/50 ones.
             let index = if state.active_qubits() > 0 {
-                state.next_measurement(&pending).0
+                state
+                    .next_measurement(&pending, &mut Classifier::new(state.n))
+                    .0
             } else {
                 0
             };
@@ -1021,7 +1046,16 @@ impl Group {
     /// Per live shot, whether `P_s` anticommutes with the virtual Pauli
     /// `(x, z)`.
     fn anticommutes(&self, x: &[u64], z: &[u64]) -> Vec<u64> {
-        let mut out = vec![0u64; self.words];
+        let mut out = Vec::new();
+        self.anticommutes_into(x, z, &mut out);
+        out
+    }
+
+    /// [`Group::anticommutes`] written into `out` (resized to the group's
+    /// words), so a caller can reuse one buffer.
+    fn anticommutes_into(&self, x: &[u64], z: &[u64], out: &mut Vec<u64>) {
+        out.clear();
+        out.resize(self.words, 0);
         for v in set_bits(x) {
             for (o, &f) in out.iter_mut().zip(&self.z[self.column(v)]) {
                 *o ^= f;
@@ -1035,7 +1069,6 @@ impl Group {
         for (o, a) in out.iter_mut().zip(&self.alive) {
             *o &= a;
         }
-        out
     }
 
     /// Multiply the frame of shot `s` alone by the virtual Pauli `(x, z)`.
@@ -1052,8 +1085,8 @@ impl Group {
     /// A compact copy of the shots in `mask` (which must be alive), in
     /// order.
     fn extract(&self, mask: &[u64]) -> Group {
-        let chosen: Vec<usize> = set_bits(mask).collect();
-        let words = chosen.len().div_ceil(64);
+        let plan = CompressPlan::new(mask);
+        let words = plan.count.div_ceil(64);
         // Columns that are zero over the group stay zero, with no gather:
         // without noise, frames only pick up bits at 50/50 measurements,
         // after the dense part is gone, and record columns at their own
@@ -1067,9 +1100,7 @@ impl Group {
                 if column.iter().all(|&w| w == 0) {
                     continue;
                 }
-                for (i, &s) in chosen.iter().enumerate() {
-                    out[i / 64] |= (column[s / 64] >> (s % 64) & 1) << (i % 64);
-                }
+                plan.gather(column, out);
             }
         };
         let mut x = vec![0; self.qubits() * words];
@@ -1080,7 +1111,7 @@ impl Group {
         gather(&self.records, &mut records);
         Group {
             words,
-            alive: valid(chosen.len()),
+            alive: valid(plan.count),
             x,
             z,
             records,
@@ -1115,6 +1146,123 @@ impl Group {
         }
         other
     }
+}
+
+/// How to gather the bits of one mask out of any column of a group's
+/// words, a word at a time: [`Group::extract`] used to move one bit per
+/// chosen shot per non-zero column (0.62e9 of 7.7e9 instructions of the
+/// noiseless 100-qubit example at 20,000 shots, nearly all at the large
+/// splits near the root of the measurement tree). Each mask word is
+/// planned once and its plan reused over all ~300 columns: a full word is
+/// copied, a sparse one (at most [`CompressPlan::SPARSE`] bits) moves its
+/// bits one by one, and a denser one is compressed with the masks of
+/// Hacker's Delight's `compress` (Warren, 2nd ed., §7-4), six shift-and-mask
+/// steps whatever its bit count. BMI2's `pext` does the same in one
+/// instruction, but is microcoded (~250 cycles) on AMD Zen 1 and 2, which
+/// run the x86-64-v3 wheels.
+struct CompressPlan {
+    words: Vec<PlannedWord>,
+    /// Bits in the whole mask: the size of the gathered column.
+    count: usize,
+}
+
+struct PlannedWord {
+    /// Index of the word in the column.
+    word: usize,
+    mask: u64,
+    /// Bit position of this word's first chosen bit in the output.
+    offset: usize,
+    /// The six move masks of `compress`, for dense words.
+    moves: Option<[u64; 6]>,
+}
+
+impl CompressPlan {
+    /// Mask words with at most this many bits move them one at a time
+    /// (about four operations per bit, against about 24 for `compress`).
+    const SPARSE: u32 = 6;
+
+    fn new(mask: &[u64]) -> CompressPlan {
+        let mut words = Vec::new();
+        let mut count = 0;
+        for (word, &m) in mask.iter().enumerate() {
+            if m == 0 {
+                continue;
+            }
+            let ones = m.count_ones();
+            let moves = (ones > Self::SPARSE && m != u64::MAX).then(|| compress_moves(m));
+            words.push(PlannedWord {
+                word,
+                mask: m,
+                offset: count,
+                moves,
+            });
+            count += ones as usize;
+        }
+        CompressPlan { words, count }
+    }
+
+    /// OR the chosen bits of `column` into `out` (zero, `count` bits),
+    /// in order.
+    fn gather(&self, column: &[u64], out: &mut [u64]) {
+        for w in &self.words {
+            let v = column[w.word];
+            let bits = match (w.mask, &w.moves) {
+                (u64::MAX, _) => v,
+                (m, Some(moves)) => compress(v, m, moves),
+                (m, None) => {
+                    let (mut bits, mut rest, mut i) = (0u64, m, 0);
+                    while rest != 0 {
+                        let s = rest.trailing_zeros();
+                        bits |= (v >> s & 1) << i;
+                        rest &= rest - 1;
+                        i += 1;
+                    }
+                    bits
+                }
+            };
+            let (o, shift) = (w.offset / 64, w.offset % 64);
+            out[o] |= bits << shift;
+            if shift > 0 && shift + w.mask.count_ones() as usize > 64 {
+                out[o + 1] |= bits >> (64 - shift);
+            }
+        }
+    }
+}
+
+/// The move masks of Hacker's Delight's `compress` for mask `m` (Warren,
+/// *Hacker's Delight*, 2nd ed., Figure 7-10): step `i` moves the bits in
+/// `moves[i]` right by `2^i`.
+fn compress_moves(mut m: u64) -> [u64; 6] {
+    let mut moves = [0u64; 6];
+    // Bits with a zero of the mask to their right, to be counted.
+    let mut mk = !m << 1;
+    for (i, mv) in moves.iter_mut().enumerate() {
+        // Parallel suffix: bit j of `mp` is the parity of the bits of `mk`
+        // at or below j, the parity of bit i of each mask bit's distance.
+        let mut mp = mk ^ (mk << 1);
+        mp ^= mp << 2;
+        mp ^= mp << 4;
+        mp ^= mp << 8;
+        mp ^= mp << 16;
+        mp ^= mp << 32;
+        let v = mp & m;
+        *mv = v;
+        m = (m ^ v) | (v >> (1 << i));
+        mk &= !mp;
+    }
+    moves
+}
+
+/// The bits of `x` under `m`, packed into the low bits in order, with
+/// `moves` from [`compress_moves`]`(m)`.
+#[inline]
+fn compress(x: u64, m: u64, moves: &[u64; 6]) -> u64 {
+    let mut x = x & m;
+    for (i, &mv) in moves.iter().enumerate() {
+        let t = x & mv;
+        x = (x ^ t) | (t >> (1 << i));
+    }
+    x
 }
 
 /// Bits over `shots`: word-wise mask of the valid shots.
@@ -1159,10 +1307,14 @@ fn measure_shots(
     c: usize,
     kind: Kind,
     rng: &mut Pcg64,
+    scratch: &mut Scratch,
 ) -> Option<Split> {
     let (dormant, pulled) = state.gather_dormant(&[(q, 'Z')]);
     sync(state, group);
-    let flips = group.anticommutes(&pulled.1, &pulled.2);
+    let Scratch {
+        flips, effective, ..
+    } = scratch;
+    group.anticommutes_into(&pulled.1, &pulled.2, flips);
     match kind {
         Kind::Fixed => {
             let fixed = if state.on_positions(&pulled).negative {
@@ -1173,7 +1325,7 @@ fn measure_shots(
             let column = group.column(c);
             for ((r, f), a) in group.records[column]
                 .iter_mut()
-                .zip(&flips)
+                .zip(flips.iter())
                 .zip(&group.alive)
             {
                 *r = (f ^ fixed) & a;
@@ -1186,17 +1338,18 @@ fn measure_shots(
             // with effective outcome 1 carries X_d in its frame.
             state.collapse(q, false);
             sync(state, group);
-            let effective: Vec<u64> = group
-                .alive
-                .iter()
-                .map(|a| rng.random::<u64>() & a)
-                .collect();
+            effective.clear();
+            effective.extend(group.alive.iter().map(|a| rng.random::<u64>() & a));
             let column = group.column(d);
-            for (x, e) in group.x[column].iter_mut().zip(&effective) {
+            for (x, e) in group.x[column].iter_mut().zip(effective.iter()) {
                 *x ^= e;
             }
             let column = group.column(c);
-            for ((r, e), f) in group.records[column].iter_mut().zip(&effective).zip(&flips) {
+            for ((r, e), f) in group.records[column]
+                .iter_mut()
+                .zip(effective.iter())
+                .zip(flips.iter())
+            {
                 *r = e ^ f;
             }
             None
@@ -1205,17 +1358,18 @@ fn measure_shots(
             // No dormant X part, so `gather_dormant` left the frame alone
             // and `pulled` stays valid through both collapses.
             let one = state.dense_probability_one(&pulled);
-            let effective: Vec<u64> = group
-                .alive
-                .iter()
-                .map(|a| {
-                    (0..64).fold(0u64, |acc, b| {
-                        acc | ((rng.random::<f64>() < one) as u64) << b
-                    }) & a
-                })
-                .collect();
+            effective.clear();
+            effective.extend(group.alive.iter().map(|a| {
+                (0..64).fold(0u64, |acc, b| {
+                    acc | ((rng.random::<f64>() < one) as u64) << b
+                }) & a
+            }));
             let column = group.column(c);
-            for ((r, e), f) in group.records[column].iter_mut().zip(&effective).zip(&flips) {
+            for ((r, e), f) in group.records[column]
+                .iter_mut()
+                .zip(effective.iter())
+                .zip(flips.iter())
+            {
                 *r = e ^ f;
             }
             let ones: usize = effective.iter().map(|w| w.count_ones() as usize).sum();
@@ -1225,12 +1379,34 @@ fn measure_shots(
                 sync(state, group);
                 return None;
             }
-            let mut other_group = group.split_off(&effective, true);
+            let mut other_group = group.split_off(effective, true);
             let mut other = state.split_dense(&pulled, one);
             sync(state, group);
             sync(&mut other, &mut other_group);
             let (seed0, seed1) = (rng.random::<u64>(), rng.random::<u64>());
             Some((other, other_group, seed1, seed0))
+        }
+    }
+}
+
+/// Buffers that one branch of [`sample_frames`] reuses for all its
+/// measurements: with nearly every shot in a group of its own at 10,000
+/// shots, the three classifier buffers and two word buffers allocated per
+/// measurement were most of the sampler's `malloc` and `free` calls.
+struct Scratch {
+    classifier: Classifier,
+    /// Per live shot, whether its frame flips the measured outcome.
+    flips: Vec<u64>,
+    /// Per live shot, the outcome drawn in the shared state.
+    effective: Vec<u64>,
+}
+
+impl Scratch {
+    fn new(n: usize) -> Scratch {
+        Scratch {
+            classifier: Classifier::new(n),
+            flips: Vec::new(),
+            effective: Vec::new(),
         }
     }
 }
@@ -1252,11 +1428,12 @@ fn sample_frames(
     // Frames start without errors; from here on every Clifford prepended
     // to the shared frame must reach them.
     state.log.get_or_insert_with(Vec::new);
+    let mut scratch = Scratch::new(state.n);
     while !pending.is_empty() {
-        let (index, kind) = state.next_measurement(&pending);
+        let (index, kind) = state.next_measurement(&pending, &mut scratch.classifier);
         let (q, c) = pending.swap_remove(index);
         if let Some((other, other_group, seed, own_seed)) =
-            measure_shots(&mut state, &mut group, q, c, kind, &mut rng)
+            measure_shots(&mut state, &mut group, q, c, kind, &mut rng, &mut scratch)
         {
             let other_pending = pending.clone();
             let (mut leaves, more) = rayon::join(
@@ -1336,4 +1513,91 @@ pub fn run(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<RunResu
     result.stats.measure_seconds = start.elapsed().as_secs_f64();
     result.stats.peak_active_qubits = Some(peak);
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The chosen bits of `column`, one at a time, as `extract` gathered
+    /// them before [`CompressPlan`].
+    fn gather_bitwise(column: &[u64], mask: &[u64]) -> Vec<u64> {
+        let chosen: Vec<usize> = set_bits(mask).collect();
+        let mut out = vec![0u64; chosen.len().div_ceil(64)];
+        for (i, &s) in chosen.iter().enumerate() {
+            out[i / 64] |= (column[s / 64] >> (s % 64) & 1) << (i % 64);
+        }
+        out
+    }
+
+    #[test]
+    fn compress_matches_bit_by_bit_gather() {
+        let mut rng = Pcg64::seed_from_u64(7);
+        for trial in 0..2000 {
+            let words = 1 + trial % 5;
+            // Masks from empty to full, sparse to dense, including whole
+            // words of zeros and ones.
+            let mask: Vec<u64> = (0..words)
+                .map(|_| match rng.random_range(0..6) {
+                    0 => 0,
+                    1 => u64::MAX,
+                    2 => 1u64 << rng.random_range(0..64),
+                    3 => rng.random::<u64>() & rng.random::<u64>() & rng.random::<u64>(),
+                    4 => rng.random::<u64>() | rng.random::<u64>(),
+                    _ => rng.random::<u64>(),
+                })
+                .collect();
+            let column: Vec<u64> = (0..words).map(|_| rng.random()).collect();
+            let plan = CompressPlan::new(&mask);
+            let expected = gather_bitwise(&column, &mask);
+            assert_eq!(plan.count, set_bits(&mask).count());
+            let mut out = vec![0u64; plan.count.div_ceil(64)];
+            plan.gather(&column, &mut out);
+            assert_eq!(out, expected, "mask {mask:x?}");
+            for &m in &mask {
+                let x = rng.random::<u64>();
+                assert_eq!(
+                    compress(x, m, &compress_moves(m)),
+                    gather_bitwise(&[x], &[m]).first().copied().unwrap_or(0)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extract_keeps_each_chosen_shot_in_order() {
+        let mut rng = Pcg64::seed_from_u64(11);
+        for shots in [1, 5, 64, 65, 200, 300] {
+            let mut group = Group::new(7, shots, &[true, false, true]);
+            for v in group
+                .x
+                .iter_mut()
+                .chain(group.z.iter_mut())
+                .chain(group.records.iter_mut())
+            {
+                *v = rng.random();
+            }
+            // Columns of zeros must stay zero.
+            let w = group.words;
+            group.x[2 * w..3 * w].fill(0);
+            let mut mask: Vec<u64> = group
+                .alive
+                .iter()
+                .map(|&a| rng.random::<u64>() & a)
+                .collect();
+            // A split always moves at least one shot.
+            mask[0] |= 1;
+            let other = group.extract(&mask);
+            let count = set_bits(&mask).count();
+            assert_eq!(other.count(), count);
+            for (table, from) in [(&other.x, &group.x), (&other.z, &group.z)]
+                .into_iter()
+                .chain([(&other.records, &group.records)])
+            {
+                for (column, out) in from.chunks_exact(w).zip(table.chunks_exact(other.words)) {
+                    assert_eq!(out, gather_bitwise(column, &mask).as_slice());
+                }
+            }
+        }
+    }
 }

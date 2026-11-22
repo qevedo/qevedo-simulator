@@ -7,6 +7,68 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-22 — Allocations and bit gathers of the noiseless near-Clifford frames (0.1.15)
+
+**What.** In the noiseless near-Clifford sampler's final measurements
+(`sample_frames` in `nearclifford/mod.rs`) and the frame it reads
+(`stabilizer/tableau.rs`):
+- `Tableau::row_into` gathers a row of the column-major frame into the
+  caller's buffers: the bits of 64 columns collect in two registers and are
+  stored once, and the column table is sliced to exactly the words read, so
+  the loop has no bounds check per load. `row` and `pull_back_z_bits` use
+  it.
+- `Tableau::pull_back` writes its first row straight into the result (the
+  product with the identity has no phase), so a one-factor Pauli, every
+  measurement and most rotations, takes one gather and no scratch.
+- One `Classifier` and two word buffers (`Scratch`) per `sample_frames`
+  branch, instead of five allocations per measurement;
+  `Group::anticommutes_into` writes into a buffer (the noisy path keeps
+  `anticommutes`).
+- `Group::extract` plans each mask word once (`CompressPlan`) and reuses
+  the plan over all ~300 columns: full words are copied, words with at most
+  six chosen shots move them one by one, denser ones go through Hacker's
+  Delight's `compress` (six shift-and-mask steps).
+- `retire_plan` allocates its gate list once; `set_positions` walks set
+  bits with `trailing_zeros` instead of testing 64 positions.
+
+**Why.** Next items 1 and 2 of 2026-11-20, from that run's profile:
+allocation (0.78e9), `extract` (1.22e9) and row gathers (0.67e9 plus those
+inside the classification) were most of the 7.69e9 instructions at 20,000
+shots. A search for newer methods (cultivation samplers SOFT, PFSR and
+arXiv:2509.08658; 2026 CPU state-vector papers) found nothing that applies
+to this backend today, and these changes keep every random draw, so they
+can be proved exactly by counts digests.
+
+**Measured** (4-vCPU Xeon VM, x86-64-v3 builds as the wheels).
+- Callgrind, 100-qubit 24-T example, 20,000 shots, one thread: 7.69e9 →
+  6.03e9 instructions (−21.6%); `retire_plan` 0.34e9 → 0.08e9.
+- Counts digests (a temporary example, not committed): identical to 0.1.14
+  on 84 cases (7 circuits including mid-circuit measurements, resets and
+  130 qubits; 1, 777 and 10,000 shots; 1 and 4 threads; 2 seeds).
+- `compare_examples.py`, 100-qubit 24-T example on 4 threads, total with
+  gates, 60 interleaved rounds (`examples_before_after_recheck.csv`):
+  medians 0.797 at 100,000 shots (0.875 → 0.718 s best), 0.914 at 10,000,
+  0.984 at 1000.
+- Other binaries: state vector, Pauli propagation, kernels and bandwidth
+  byte-identical `.text`. Stabilizer, Stim detectors, MPS, shots: 15-round
+  medians 0.941-1.026, except Stim detectors d = 21 at 1.077 (a 50 ms run
+  timed to the millisecond), which read 1.000 over 60 rounds; shots and
+  the 1000-shot case read 1.065 / 1.061 best-of over 15 and 0.984 / 0.984
+  medians over 60.
+- Noisy near-Clifford cases (`compare_noisy_builds.py`, 9 rounds, then 40
+  for the 60- and 100-qubit cases): 40-round medians 0.924-1.030, best-of
+  0.913-1.182 (the 1.182 is a 10 ms case whose median is 0.980).
+
+**Learned.** Per-line callgrind counts showed the strided row gather at
+about 13 instructions per column bit, two of them a bounds check that one
+up-front slice removed. After the obvious buffers went, the remaining
+allocations were in an unexpected place (`retire_plan`'s growing gate
+list), found from callgrind's caller tree rather than guessed.
+
+**Next.** Fewer row gathers (the measurement pulls back the `Z_q` the
+classifier just gathered), skipping zero frame columns in
+`anticommutes_into`, and one pass fewer per dense measurement.
+
 ## 2026-11-20 — Nothing shipped: buffer reuse and one-pass classification on the noiseless frames
 
 **What was tried.** Two changes to the noiseless near-Clifford sampler

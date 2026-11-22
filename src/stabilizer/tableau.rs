@@ -555,17 +555,40 @@ impl Tableau {
 
     /// The `(x, z)` words of row `row`, in either layout.
     fn row(&self, row: usize) -> (Vec<u64>, Vec<u64>) {
+        let (mut xs, mut zs) = (vec![0u64; self.words], vec![0u64; self.words]);
+        self.row_into(row, &mut xs, &mut zs);
+        (xs, zs)
+    }
+
+    /// [`Tableau::row`] written into `xs` and `zs` (`words` words each),
+    /// with no allocation. In the column layout a row is one bit of every
+    /// column; the bits of 64 columns are collected in two registers and
+    /// stored once, rather than read, ORed and written back one bit at a
+    /// time (this gather was the largest item of the noiseless near-Clifford
+    /// sampler's profile: 1.1e9 of 7.7e9 instructions at 20,000 shots).
+    fn row_into(&self, row: usize, xs: &mut [u64], zs: &mut [u64]) {
         if !self.columns {
             let r = self.range(row);
-            return (self.xs[r.clone()].to_vec(), self.zs[r].to_vec());
+            xs.copy_from_slice(&self.xs[r.clone()]);
+            zs.copy_from_slice(&self.zs[r]);
+            return;
         }
-        let (mut xs, mut zs) = (vec![0u64; self.words], vec![0u64; self.words]);
         let (rw, rb) = (row / 64, row % 64);
-        for k in 0..self.n {
-            xs[k / 64] |= (self.xs[k * self.column_words + rw] >> rb & 1) << (k % 64);
-            zs[k / 64] |= (self.zs[k * self.column_words + rw] >> rb & 1) << (k % 64);
+        let stride = self.column_words;
+        // Every column's word `rw`, `stride` apart: slicing to exactly the
+        // last one lets the compiler drop the bounds check of each load.
+        let end = rw + (self.n - 1) * stride + 1;
+        let (column_x, column_z) = (&self.xs[rw..end], &self.zs[rw..end]);
+        for (w, (x_out, z_out)) in xs.iter_mut().zip(zs.iter_mut()).enumerate() {
+            let (mut x, mut z) = (0u64, 0u64);
+            let first = w * 64;
+            for j in 0..(self.n - first).min(64) {
+                let k = (first + j) * stride;
+                x |= (column_x[k] >> rb & 1) << j;
+                z |= (column_z[k] >> rb & 1) << j;
+            }
+            (*x_out, *z_out) = (x, z);
         }
-        (xs, zs)
     }
 
     fn x_row(&self, k: usize) -> usize {
@@ -1136,16 +1159,28 @@ impl Tableau {
     pub(crate) fn pull_back(&self, pauli: &[(usize, char)]) -> (bool, Vec<u64>, Vec<u64>) {
         let words = self.words;
         let (mut xs, mut zs) = (vec![0u64; words], vec![0u64; words]);
-        let mut exponent = 0u32;
-        let multiply = |row: usize, xs: &mut [u64], zs: &mut [u64]| -> u32 {
-            let (rx, rz) = self.row(row);
-            let phase = product_phase(xs, zs, &rx, &rz);
+        // The first row is written straight into the result (the product
+        // with the identity has no phase), so a one-factor Pauli, which is
+        // every measurement and most rotations, costs one row gather and
+        // no scratch; later rows go through `scratch`.
+        let mut scratch: Option<(Vec<u64>, Vec<u64>)> = None;
+        let mut first = true;
+        let mut multiply = |row: usize, xs: &mut [u64], zs: &mut [u64]| -> u32 {
+            let sign = 2 * self.sign(row) as u32;
+            if std::mem::take(&mut first) {
+                self.row_into(row, xs, zs);
+                return sign;
+            }
+            let (rx, rz) = scratch.get_or_insert_with(|| (vec![0u64; words], vec![0u64; words]));
+            self.row_into(row, rx, rz);
+            let phase = product_phase(xs, zs, rx, rz);
             for w in 0..words {
                 xs[w] ^= rx[w];
                 zs[w] ^= rz[w];
             }
-            phase + 2 * self.sign(row) as u32
+            phase + sign
         };
+        let mut exponent = 0u32;
         for &(q, p) in pauli {
             match p {
                 'X' => exponent += multiply(self.x_row(q), &mut xs, &mut zs),
@@ -1170,20 +1205,7 @@ impl Tableau {
     /// and `zs` (`words` words each), with no allocation: the part of
     /// [`Tableau::pull_back`] that classifying a measurement needs.
     pub(crate) fn pull_back_z_bits(&self, q: usize, xs: &mut [u64], zs: &mut [u64]) {
-        let row = self.z_row(q);
-        if !self.columns {
-            let r = self.range(row);
-            xs.copy_from_slice(&self.xs[r.clone()]);
-            zs.copy_from_slice(&self.zs[r]);
-            return;
-        }
-        xs.fill(0);
-        zs.fill(0);
-        let (rw, rb) = (row / 64, row % 64);
-        for k in 0..self.n {
-            xs[k / 64] |= (self.xs[k * self.column_words + rw] >> rb & 1) << (k % 64);
-            zs[k / 64] |= (self.zs[k * self.column_words + rw] >> rb & 1) << (k % 64);
-        }
+        self.row_into(self.z_row(q), xs, zs);
     }
 
     /// `C X_v C†` for the virtual qubit `v`, without its sign: x and z bits
