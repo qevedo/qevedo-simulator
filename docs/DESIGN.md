@@ -652,6 +652,19 @@ one, and their fixed costs outweighed the kernels:
   over the group are not gathered at a split.
 The arithmetic is unchanged, so the counts for a seed are those of 0.1.13.
 
+**Gathers and allocations of the noiseless frames** (0.1.15). With the
+fixed costs above gone, the profile (callgrind, 20,000 shots, one thread)
+was bookkeeping again: allocation, `Group::extract` and gathering rows of
+the column-major frame. `Tableau::row_into` collects a row's bits 64 columns
+at a time in registers, from a slice cut to the words it reads, and
+`pull_back` writes its first row in place; one `Classifier` and two word
+buffers serve a whole branch of `sample_frames`; `extract` plans each word
+of the chosen-shots mask once and reuses the plan over all columns, copying
+full words, moving sparse ones bit by bit and compressing dense ones with
+Hacker's Delight's `compress` (not BMI2 `pext`, which is microcoded on
+AMD Zen 1 and 2). 7.69e9 instructions became 6.03e9; the 100-qubit example
+takes 0.80× 0.1.14's time at 100,000 shots, with the same counts.
+
 **Noise** (`nearclifford/noisy.rs`). Pauli channels (all of `Noise`) use
 per-shot Pauli frames from the first channel on, as Clifft's virtual Pauli
 frame does. Each shot is in the state `C P_s (φ_g ⊗ |0...0>)`: the frame `C`
