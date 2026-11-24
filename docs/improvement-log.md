@@ -7,6 +7,74 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-24 — The rest of Stim's instruction set in the reader (0.1.16)
+
+**What.** `stim.rs` now reads every instruction of Stim 1.16 except
+classically controlled gates and sweep bits:
+- 25 more Clifford gates, each a short sequence of the simulator's own
+  gates (`gate_sequence` now gives each step its qubits by position, so a
+  pair gate can put one-qubit gates on either qubit or reverse a CX):
+  `II`, `XCX`, `XCY`, `XCZ`, `YCX`, `YCY`, `YCZ` (controls in another
+  basis), `CXSWAP`, `SWAPCX`, `CZSWAP`/`SWAPCZ`, `ISWAP`, `ISWAP_DAG`,
+  `SQRT_XX`, `SQRT_YY`, `SQRT_ZZ` and their `_DAG`s
+  (`CX (I ⊗ S^±1) CX` between basis changes), `H_NXY`, `H_NXZ`, `H_NYZ`
+  and the negated cycles `C_NXYZ`, `C_XNYZ`, `C_XYNZ`, `C_NZYX`, `C_ZNYX`,
+  `C_ZYNX`.
+- `MXX`, `MYY`, `MZZ` (with `!` targets and flip probabilities) as
+  two-factor products through the same code as `MPP`, now split into
+  `products`, `on_product` and `measure_product`.
+- `SPP` and `SPP_DAG`: an S or S† on the product's last qubit between
+  `MPP`'s basis changes and CX ladder; `!` swaps S and S†.
+- `HERALDED_ERASE(p)` and `HERALDED_PAULI_CHANNEL_1(pI, pX, pY, pZ)`: one
+  extra qubit `h` after Stim's, and per target a correlated error with
+  products `X_h I`, `X_h X`, `X_h Y`, `X_h Z` (at most one happens), then
+  `h` measured into the herald's record and reset. Herald and Pauli are as
+  correlated as in Stim, and nothing in the samplers changed.
+- `I_ERROR`, `II_ERROR` (no effect) and instruction tags
+  (`X_ERROR[leak](0.1) 0`).
+
+**Why.** Next item 8. The previous six runs all sped up the noiseless or
+noisy near-Clifford frames; meanwhile whole families of error-correction
+circuits failed to load at all: erasure-qubit codes (heralds), lattice
+surgery and pair-measurement codes (`MXX`/`MZZ`), and circuits compiled to
+iSWAP- or `SQRT_XX`-native hardware. Each is exact, cheap to run on the
+existing stabilizer sampler, and can be proved against Stim today.
+
+**Measured.**
+- Rust: each new gate's images of X and Z (and of X1, Z1) equal Stim's
+  tableau (`stim.Tableau.from_named_gate`, Stim 1.16), also on a reversed,
+  spread-out pair; `SPP`/`SPP_DAG` on 200 random products equal
+  `(1 ± i)/2 I + (1 ∓ i)/2 P` up to phase; `MXX`/`MYY`/`MZZ` parse to the
+  same circuit as the `MPP`s; heralded joint rates (herald, outcome) at
+  200,000 shots within 5σ of the exact values. Mutations (XCY with CX,
+  the herald product `XI` as `II`) fail those tests.
+- Python against Stim: 300 random circuits of all the new gates, `SPP`,
+  `SPP_DAG` and pair measurements give the same affine outcome space and
+  per-bit rates as Stim's sampler; a 5-round repetition code on erasure
+  qubits with `HERALDED_ERASE`, `HERALDED_PAULI_CHANNEL_1` and `MZZ(0.01)`
+  fires each of its 35 detectors and the observable at Stim's rate
+  (200,000 shots, within 5σ).
+- Speed (4-vCPU VM). Only the reader changed. Callgrind on a temporary
+  example parsing Stim's generated rotated surface code three times
+  (x86-64-v3 builds): d = 21 165.7M → 165.0M instructions, d = 51
+  2067.8M → 2058.4M (both −0.5%). Wall-clock, interleaved before/after
+  wheels: `from_stim` at d = 51 medians 0.997 (10 rounds), d = 21 0.967
+  median of 20 rounds × 60 calls; `sample_detectors` d = 21, 10,000
+  shots, 0.965 (10 rounds), and 1.037 in a later batch where the
+  unchanged sampler also read best-of 1.117, i.e. noise.
+- A first version was slower: parsing d = 51 read medians 0.153 → 0.166
+  s (6 rounds) because each two-qubit target allocated a `Vec` for its
+  qubits and each line a `Vec` of steps; a stack array and constant step
+  tables fixed it (see experiments.md, Didn't work).
+
+**Learned.** Stim's own tableau API gives the conventions directly, and a
+brute-force search found the one-qubit decompositions in seconds. Check
+`aliases` too (`SWAPCZ`).
+
+**Next.** Classically controlled Paulis (`CX rec[-1] q`) in the
+stabilizer sampler; `to_stim` writing detectors; then back to the
+near-Clifford frames' row gathers.
+
 ## 2026-11-22 — Allocations and bit gathers of the noiseless near-Clifford frames (0.1.15)
 
 **What.** In the noiseless near-Clifford sampler's final measurements

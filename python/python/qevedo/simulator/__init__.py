@@ -227,8 +227,10 @@ def from_stim(text) -> tuple[Circuit, list[list[int]], list[list[int]]]:
 
     Returns the ``Circuit`` (measurement ``m``, in Stim's order, is
     classical bit ``m``; ``REPEAT`` blocks are unrolled), the detectors and
-    the observables, each a list of measurement indices. Fails on
-    instructions Qevedo cannot run, naming the line.
+    the observables, each a list of measurement indices. A circuit with
+    heralded errors has one extra qubit, after Stim's, that records the
+    heralds. Fails on instructions Qevedo cannot run (classically
+    controlled gates, sweep bits), naming the line.
     """
     return _circuit_from_stim(str(text))
 

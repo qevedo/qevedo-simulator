@@ -464,6 +464,88 @@ def test_mpp_matches_stim_on_random_circuits():
         assert np.abs(theirs.mean(axis=0) - ours.mean(axis=0)).max() < 0.05, text
 
 
+def test_every_stim_gate_matches_stim_on_random_circuits():
+    stim = pytest.importorskip("stim")
+    np = pytest.importorskip("numpy")
+    # As above, with the rest of Stim's Clifford gates, two-qubit parity
+    # measurements (MXX, MYY, MZZ, inverted targets included) and SPP:
+    # outcomes span the same affine space as Stim's, at the same rates.
+    rng = random.Random(9)
+    one = ["H_NXY", "H_NXZ", "H_NYZ", "C_NXYZ", "C_NZYX", "C_XNYZ", "C_XYNZ", "C_ZNYX",
+           "C_ZYNX", "H", "S", "SQRT_X"]
+    two = ["CXSWAP", "SWAPCX", "CZSWAP", "SWAPCZ", "ISWAP", "ISWAP_DAG", "SQRT_XX",
+           "SQRT_XX_DAG", "SQRT_YY", "SQRT_YY_DAG", "SQRT_ZZ", "SQRT_ZZ_DAG", "XCX", "XCY",
+           "XCZ", "YCX", "YCY", "YCZ", "II", "CX"]
+    for trial in range(300):
+        n = rng.randint(2, 6)
+        lines = []
+        for _ in range(rng.randint(1, 4)):
+            for _ in range(rng.randint(1, 6)):
+                r = rng.random()
+                if r < 0.3:
+                    lines.append(f"{rng.choice(one)} {rng.randrange(n)}")
+                elif r < 0.8:
+                    a, b = rng.sample(range(n), 2)
+                    lines.append(f"{rng.choice(two)} {a} {b}")
+                else:
+                    qubits = rng.sample(range(n), rng.randint(1, n))
+                    factors = [("!" if rng.random() < 0.2 else "") + rng.choice("XYZ") + str(q) for q in qubits]
+                    lines.append(f"{rng.choice(['SPP', 'SPP_DAG'])} " + "*".join(factors))
+            a, b = rng.sample(range(n), 2)
+            bang = "!" if rng.random() < 0.3 else ""
+            lines.append(f"{rng.choice(['MXX', 'MYY', 'MZZ'])} {bang}{a} {b}")
+            if rng.random() < 0.5:
+                lines.append("M " + " ".join(map(str, range(n))))
+        text = "\n".join(lines) + "\n"
+        shots = 4000
+        theirs = stim.Circuit(text).compile_sampler(seed=trial).sample(shots)
+        ours = sample(text, shots, seed=trial).T
+        offset_t, span_t = _affine_span(theirs)
+        offset_o, span_o = _affine_span(ours)
+        assert len(span_t) == len(span_o), text
+        assert all(_reduce(v, span_t) == 0 for v in span_o.values()), text
+        assert _reduce(offset_t ^ offset_o, span_t) == 0, text
+        assert np.abs(theirs.mean(axis=0) - ours.mean(axis=0)).max() < 0.05, text
+
+
+def test_heralded_errors_and_pair_measurements_against_stim():
+    stim = pytest.importorskip("stim")
+    np = pytest.importorskip("numpy")
+    # A repetition code on erasure qubits: heralded erasures and heralded
+    # Pauli channels on the data, parities measured with MZZ(p), and
+    # detectors on both the heralds and the parities. Every detector
+    # fires at Stim's rate.
+    text = """\
+R 0 1 2 3 4
+REPEAT 5 {
+    HERALDED_ERASE(0.02) 0 1 2 3 4
+    HERALDED_PAULI_CHANNEL_1(0.01, 0.02, 0.005, 0.01) 0 2 4
+    MZZ(0.01) 0 1 1 2 2 3 3 4
+    DETECTOR rec[-12]
+    DETECTOR rec[-9]
+    DETECTOR rec[-5]
+    DETECTOR rec[-4] rec[-16]
+    DETECTOR rec[-3] rec[-15]
+    DETECTOR rec[-2] rec[-14]
+    DETECTOR rec[-1] rec[-13]
+}
+M 0 1 2 3 4
+OBSERVABLE_INCLUDE(0) rec[-1]
+"""
+    # The first round's parity detectors compare with records before the
+    # loop; pad with MPAD so every rec[-k] exists.
+    text = "MPAD 0 0 0 0\n" + text
+    shots = 200_000
+    ours_d, ours_o = sample_detectors(text, shots, seed=4)
+    sampler = stim.Circuit(text).compile_detector_sampler(seed=4)
+    theirs_d, theirs_o = sampler.sample(shots, separate_observables=True)
+    for ours, theirs in [(ours_d.mean(0), theirs_d.mean(0)), (ours_o.mean(0), theirs_o.mean(0))]:
+        pooled = (ours + theirs) / 2
+        sigma = np.sqrt(np.maximum(pooled * (1 - pooled), 1e-9) * 2 / shots)
+        assert (np.abs(ours - theirs) < 5 * sigma).all()
+        assert (ours > 0).all()
+
+
 REPETITION = """\
 R 0 1 2 3 4
 REPEAT 4 {
@@ -502,7 +584,7 @@ def test_from_stim_and_detector_shapes():
     dets, obs = sample_detectors(quiet, 500, seed=2)
     assert not dets.any() and not obs.any()
     with pytest.raises(ValueError, match="not supported"):
-        sample_detectors("MXX 0 1\n", 10)
+        sample_detectors("M 0\nCX rec[-1] 1\n", 10)
 
 
 def test_bit_packed_outputs_match_the_bool_outputs():

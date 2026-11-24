@@ -316,9 +316,15 @@ measurement, in Stim's `rec` order, unrolling `REPEAT` blocks, and keeps
 the detectors and observables as lists of measurements. Measurement and
 reset bases other than Z become basis changes around `M` and `R`
 (`MX` = H M H, `MY` = S† H M H S), so the sampler itself did not change.
-Anything it cannot run exactly (heralded errors, two-qubit parity
-measurements such as `MXX`, classically controlled gates, sweep bits) is
-an error naming the line, never skipped. Five details:
+Stim's other Clifford gates become short sequences of the simulator's
+own (checked against `stim.Tableau.from_named_gate`); `MXX`/`MYY`/`MZZ`
+are two-factor `MPP`s; `SPP P` is an S on the last qubit between the
+same basis changes and CX ladder that `MPP` uses. A heralded error on
+`q` is a correlated error `X_h ⊗ {I, X, Y, Z}_q` (at most one product)
+on an extra qubit `h` in `|0>`, which is then measured into the herald's
+record and reset: herald and Pauli are exactly as correlated as in Stim.
+Anything it cannot run exactly (classically controlled gates, sweep
+bits) is an error naming the line, never skipped. Five details:
 - *Detection events are relative to the reference shot.* A detector fires
   when its measurements' parity differs from the noiseless circuit's, as in
   Stim. The sampler's reference shot is that noiseless run, so
@@ -991,8 +997,8 @@ remain (79 of its 87 s at 5 steps, θ_h = 1.2).
 - **Noise on more backends, and more of Stim's format.** The state
   vector and MPS backends do not take noise (trajectories would). The
   near-Clifford backend does not read Stim's format or return detection
-  events. The Stim reader lacks heralded errors, `MXX`/`MYY`/`MZZ` and
-  `SPP`, classical control from measurement records and sweep bits, and
+  events. The Stim reader lacks classical control from measurement
+  records and sweep bits, and
   `to_stim` does not write detectors. `sample_detectors` keeps
   every measurement record in memory (one bit per measurement and shot)
   before reducing them to detectors. Sampling detectors directly, with a cost that

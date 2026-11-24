@@ -52,9 +52,25 @@ OBSERVABLE_INCLUDE(1) rec[-2] rec[-3]
 fn errors_name_the_line() {
     for (text, message) in [
         (
-            "H 0\nMXX 0 1\n",
-            "line 2: Stim instruction MXX is not supported",
+            "H 0\nMPP_X 0 1\n",
+            "line 2: Stim instruction MPP_X is not supported",
         ),
+        ("MXX 0 0\n", "line 1: MXX on qubit 0 twice"),
+        ("MZZ 0 1 2\n", "line 1: MZZ needs pairs of targets"),
+        ("MYY X0 X1\n", "line 1: MYY takes qubit targets"),
+        ("SPP X0*Z0\n", "line 1: SPP: qubit 0 appears twice"),
+        ("SPP_DAG(0.1) X0\n", "line 1: SPP_DAG takes no arguments"),
+        ("ISWAP 1 1\n", "line 1: ISWAP on qubit 1 twice"),
+        (
+            "HERALDED_ERASE(0.1) X0\n",
+            "line 1: HERALDED_ERASE takes qubit targets",
+        ),
+        (
+            "HERALDED_PAULI_CHANNEL_1(0.1) 0\n",
+            "line 1: HERALDED_PAULI_CHANNEL_1 takes 4 probability",
+        ),
+        ("II_ERROR 0\n", "line 1: II_ERROR needs pairs"),
+        ("X_ERROR[tag(0.1) 0\n", "line 1: unclosed '['"),
         ("MPP X0*Z0\n", "line 1: MPP: qubit 0 appears twice"),
         ("MPP 0 1\n", "line 1: MPP takes Pauli products"),
         ("H X0\n", "line 1: H takes qubit targets, not Paulis"),
@@ -145,6 +161,233 @@ fn gates_follow_stims_pauli_tables() {
         assert!(conjugate(&c, &x).distance(&to_x) < 1e-12, "{name} on X");
         assert!(conjugate(&c, &z).distance(&to_z) < 1e-12, "{name} on Z");
     }
+}
+
+/// A Pauli string in Stim's notation (`+X_Z`, `-YY`: the sign, then one
+/// letter per qubit from qubit 0, `_` for the identity) as a matrix.
+fn pauli_string(text: &str) -> Matrix {
+    let (sign, letters) = text.split_at(1);
+    let n = letters.len();
+    let all: Vec<usize> = (0..n).collect();
+    let mut m = Matrix::identity(n);
+    for (q, letter) in letters.chars().enumerate() {
+        let gate = match letter {
+            'X' => Gate::X,
+            'Y' => Gate::Y,
+            'Z' => Gate::Z,
+            _ => continue,
+        };
+        m = gate.matrix().embed(&[q], &all).mul(&m);
+    }
+    if sign == "-" {
+        m = Matrix::new(m.entries().iter().map(|e| -e).collect());
+    }
+    m
+}
+
+/// The unitary of the gates of `circuit`, on its `n` qubits.
+fn unitary(circuit: &qvd::Circuit, n: usize) -> Matrix {
+    let all: Vec<usize> = (0..n).collect();
+    let mut u = Matrix::identity(n);
+    for instruction in &circuit.instructions {
+        if let Instruction::Gate { gate, qubits } = instruction {
+            u = gate.matrix().embed(qubits, &all).mul(&u);
+        }
+    }
+    u
+}
+
+#[test]
+fn more_gates_follow_stims_pauli_tables() {
+    // Where each gate sends X0, Z0 (and X1, Z1 for pairs), printed by
+    // `stim.Tableau.from_named_gate(name)` with Stim 1.16.
+    let one: [(&str, &str, &str); 9] = [
+        ("H_NXY", "-Y", "-Z"),
+        ("H_NXZ", "-Z", "-X"),
+        ("H_NYZ", "-X", "-Y"),
+        ("C_NXYZ", "-Y", "-X"),
+        ("C_NZYX", "-Z", "-Y"),
+        ("C_XNYZ", "-Y", "+X"),
+        ("C_XYNZ", "+Y", "-X"),
+        ("C_ZNYX", "+Z", "-Y"),
+        ("C_ZYNX", "-Z", "+Y"),
+    ];
+    for (name, to_x, to_z) in one {
+        let u = unitary(&parse(&format!("{name} 0\n")).unwrap().circuit, 1);
+        for (from, to) in [("+X", to_x), ("+Z", to_z)] {
+            let image = u.mul(&pauli_string(from)).mul(&u.adjoint());
+            assert!(
+                image.distance(&pauli_string(to)) < 1e-12,
+                "{name} on {from}"
+            );
+        }
+    }
+    let two: [(&str, [&str; 4]); 20] = [
+        ("II", ["+X_", "+Z_", "+_X", "+_Z"]),
+        ("CXSWAP", ["+XX", "+_Z", "+X_", "+ZZ"]),
+        ("SWAPCX", ["+_X", "+ZZ", "+XX", "+Z_"]),
+        ("CZSWAP", ["+ZX", "+_Z", "+XZ", "+Z_"]),
+        ("SWAPCZ", ["+ZX", "+_Z", "+XZ", "+Z_"]),
+        ("ISWAP", ["+ZY", "+_Z", "+YZ", "+Z_"]),
+        ("ISWAP_DAG", ["-ZY", "+_Z", "-YZ", "+Z_"]),
+        ("SQRT_XX", ["+X_", "-YX", "+_X", "-XY"]),
+        ("SQRT_XX_DAG", ["+X_", "+YX", "+_X", "+XY"]),
+        ("SQRT_YY", ["-ZY", "+XY", "-YZ", "+YX"]),
+        ("SQRT_YY_DAG", ["+ZY", "-XY", "+YZ", "-YX"]),
+        ("SQRT_ZZ", ["+YZ", "+Z_", "+ZY", "+_Z"]),
+        ("SQRT_ZZ_DAG", ["-YZ", "+Z_", "-ZY", "+_Z"]),
+        ("XCX", ["+X_", "+ZX", "+_X", "+XZ"]),
+        ("XCY", ["+X_", "+ZY", "+XX", "+XZ"]),
+        ("XCZ", ["+X_", "+ZZ", "+XX", "+_Z"]),
+        ("YCX", ["+XX", "+ZX", "+_X", "+YZ"]),
+        ("YCY", ["+XY", "+ZY", "+YX", "+YZ"]),
+        ("YCZ", ["+XZ", "+ZZ", "+YX", "+_Z"]),
+        ("CX", ["+XX", "+Z_", "+_X", "+ZZ"]),
+    ];
+    for (name, images) in two {
+        // Also on a reversed, spread-out pair, to check the qubit roles.
+        let u = unitary(&parse(&format!("{name} 0 1\n")).unwrap().circuit, 2);
+        let reversed = unitary(&parse(&format!("{name} 2 0\n")).unwrap().circuit, 3);
+        for (from, to) in ["+X_", "+Z_", "+_X", "+_Z"].iter().zip(images) {
+            let image = u.mul(&pauli_string(from)).mul(&u.adjoint());
+            assert!(
+                image.distance(&pauli_string(to)) < 1e-12,
+                "{name} on {from}"
+            );
+            // On (2, 0): qubit 2 plays qubit 0's part, qubit 0 qubit 1's.
+            let spread = |p: &str| {
+                let b = p.as_bytes();
+                format!("{}{}_{}", b[0] as char, b[2] as char, b[1] as char)
+            };
+            let image = reversed
+                .mul(&pauli_string(&spread(from)))
+                .mul(&reversed.adjoint());
+            assert!(
+                image.distance(&pauli_string(&spread(to))) < 1e-12,
+                "{name} 2 0 on {from}"
+            );
+        }
+    }
+}
+
+/// Whether `a = e^{iφ} b` for some phase.
+fn equal_up_to_phase(a: &Matrix, b: &Matrix) -> bool {
+    let (k, _) = b
+        .entries()
+        .iter()
+        .enumerate()
+        .max_by(|x, y| x.1.norm().total_cmp(&y.1.norm()))
+        .unwrap();
+    let phase = a.entries()[k] / b.entries()[k];
+    let scaled = Matrix::new(b.entries().iter().map(|e| e * phase).collect());
+    (phase.norm() - 1.0).abs() < 1e-9 && a.distance(&scaled) < 1e-9
+}
+
+#[test]
+fn spp_is_s_on_the_product() {
+    // SPP P phases the -1 eigenspace of P by i: (1 + i)/2 I + (1 - i)/2 P;
+    // SPP_DAG is its inverse, and `!` negates the product.
+    let mut rng = common::rng(17);
+    let half = |re: f64, im: f64| C64::new(re / 2.0, im / 2.0);
+    for _ in 0..200 {
+        let n = 3;
+        let k = rng.random_range(1..=n);
+        let qubits = common::random_qubits(&mut rng, n, k);
+        let letters: Vec<char> = qubits
+            .iter()
+            .map(|_| ['X', 'Y', 'Z'][rng.random_range(0..3)])
+            .collect();
+        let inverted = rng.random::<bool>();
+        let dagger = rng.random::<bool>();
+        let factors: Vec<String> = qubits
+            .iter()
+            .zip(&letters)
+            .enumerate()
+            .map(|(i, (q, l))| {
+                let bang = if inverted && i == 0 { "!" } else { "" };
+                format!("{bang}{l}{q}")
+            })
+            .collect();
+        let name = if dagger { "SPP_DAG" } else { "SPP" };
+        // A last qubit named so the circuit has all n qubits.
+        let text = format!("{name} {}\nI {}\n", factors.join("*"), n - 1);
+        let u = unitary(&parse(&text).unwrap().circuit, n);
+        let mut word = vec!['_'; n];
+        for (&q, &l) in qubits.iter().zip(&letters) {
+            word[q] = l;
+        }
+        let sign = if inverted { "-" } else { "+" };
+        let p = pauli_string(&format!("{sign}{}", word.iter().collect::<String>()));
+        let (a, b) = if dagger {
+            (half(1.0, -1.0), half(1.0, 1.0))
+        } else {
+            (half(1.0, 1.0), half(1.0, -1.0))
+        };
+        let identity = Matrix::identity(n);
+        let expected = Matrix::new(
+            identity
+                .entries()
+                .iter()
+                .zip(p.entries())
+                .map(|(i, x)| a * i + b * x)
+                .collect(),
+        );
+        assert!(equal_up_to_phase(&u, &expected), "{text}");
+    }
+}
+
+#[test]
+fn pair_measurements_are_two_factor_products() {
+    // MXX !a b is MPP !Xa*Xb, and so on, flips and all.
+    for (pairs, products) in [
+        ("MXX !0 1 2 3", "MPP !X0*X1 X2*X3"),
+        ("MYY(0.1) 3 1 !0 !2", "MPP(0.1) Y3*Y1 !Y0*!Y2"),
+        ("MZZ 1 0", "MPP Z1*Z0"),
+    ] {
+        let a = parse(&format!("H 0 1 2 3\n{pairs}\n")).unwrap();
+        let b = parse(&format!("H 0 1 2 3\n{products}\n")).unwrap();
+        assert_eq!(a, b, "{pairs}");
+    }
+}
+
+#[test]
+fn heralded_errors_record_their_heralds() {
+    // HERALDED_ERASE(0.4): a herald with probability 0.4, and then a
+    // uniform Pauli, which flips a Z (or X) measurement half the time.
+    // HERALDED_PAULI_CHANNEL_1(0.1, 0.2, 0.3, 0.15): a herald with
+    // probability 0.75, flipping a Z measurement with X or Y (0.5).
+    // Tags, I_ERROR and II_ERROR change nothing.
+    let text = "R 0 1\nRX 2\nHERALDED_ERASE[loss](0.4) 0 2\nI_ERROR(0.3) 1\nII_ERROR 0 1\n\
+                M 0\nMX 2\nR 0\nHERALDED_PAULI_CHANNEL_1(0.1, 0.2, 0.3, 0.15) 0\nM 0 1\n";
+    let c = parse(text).unwrap();
+    assert_eq!(c.num_measurements(), 7);
+    // Qubits 0..3 and the herald.
+    assert_eq!(c.circuit.num_qubits, 4);
+    let shots = 200_000;
+    let samples = sample_stim(&c, shots, Some(21)).unwrap();
+    let joint = |herald: usize, measured: usize| {
+        let mut counts = [0usize; 4];
+        for s in 0..shots {
+            counts[2 * samples.get(s, herald) as usize + samples.get(s, measured) as usize] += 1;
+        }
+        counts.map(|k| k as f64 / shots as f64)
+    };
+    for (herald, measured, expected) in [
+        (0, 2, [0.6, 0.0, 0.2, 0.2]),
+        (1, 3, [0.6, 0.0, 0.2, 0.2]),
+        (4, 5, [0.25, 0.0, 0.25, 0.5]),
+    ] {
+        let rates = joint(herald, measured);
+        for (rate, p) in rates.iter().zip(expected) {
+            let sigma = (p * (1.0 - p) / shots as f64).sqrt();
+            assert!(
+                (rate - p).abs() <= 5.0 * sigma,
+                "herald {herald}: {rates:?} vs {expected:?}"
+            );
+        }
+    }
+    // Qubit 1 saw only the identity channels.
+    assert!((0..shots).all(|s| !samples.get(s, 6)));
 }
 
 #[test]

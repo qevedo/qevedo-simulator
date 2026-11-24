@@ -77,14 +77,18 @@ eighth of the memory, as decoders that take packed input expect;
 `sample(..., bit_packed=True)` packs eight shots per byte. All of these
 are written by Rust into the array's memory, without a copy in Python.
 
-The reader takes Stim's Clifford gates, `M`/`MX`/`MY`/`MR`/`MRX`/`MRY`
-with measurement-flip probabilities (`M(0.01)`) and inverted targets
-(`M !3`), `R`/`RX`/`RY`, `MPAD`, Pauli product measurements (`MPP
-X0*Y1*Z2`, `MPP(0.01) !Z3*Z4`), the Pauli channels including
-`PAULI_CHANNEL_2`, correlated errors (`E`, `ELSE_CORRELATED_ERROR`),
-`DETECTOR`, `OBSERVABLE_INCLUDE` and nested `REPEAT` blocks; anything else
-(heralded errors, `MXX`/`MZZ`, classical control, ...) is an error naming
-the line. A chain of correlated errors read from Stim appears in
+The reader takes all of Stim's Clifford gates (`ISWAP`, `SQRT_XX`,
+`XCY`, `CXSWAP`, ...), `M`/`MX`/`MY`/`MR`/`MRX`/`MRY` with
+measurement-flip probabilities (`M(0.01)`) and inverted targets (`M !3`),
+`R`/`RX`/`RY`, `MPAD`, Pauli product measurements (`MPP X0*Y1*Z2`,
+`MPP(0.01) !Z3*Z4`) and parity measurements (`MXX`, `MYY`, `MZZ`),
+`SPP`/`SPP_DAG`, the Pauli channels including `PAULI_CHANNEL_2`,
+correlated errors (`E`, `ELSE_CORRELATED_ERROR`), heralded errors
+(`HERALDED_ERASE`, `HERALDED_PAULI_CHANNEL_1`), tags, `DETECTOR`,
+`OBSERVABLE_INCLUDE` and nested `REPEAT` blocks; classically controlled
+gates and sweep bits are an error naming the line. A circuit with
+heralded errors gets one extra qubit, after Stim's, that records the
+heralds. A chain of correlated errors read from Stim appears in
 `instructions()` as one `correlated_error` with each product's
 unconditional probability; `to_stim()` writes it back as the chain.
 

@@ -10,36 +10,51 @@
 //! [`crate::stabilizer::sample_detectors`] then samples detection events
 //! and observable flips, the input of decoders such as PyMatching.
 //!
-//! What is read:
+//! What is read (every instruction of Stim 1.16 but classical control and
+//! sweep bits):
 //! - **Gates:** `I`, `X`, `Y`, `Z`, `H` (`H_XZ`), `S` (`SQRT_Z`), `S_DAG`
 //!   (`SQRT_Z_DAG`), `SQRT_X`, `SQRT_X_DAG`, `SQRT_Y`, `SQRT_Y_DAG`,
-//!   `H_XY`, `H_YZ`, `C_XYZ`, `C_ZYX`, `CX`
-//!   (`CNOT`, `ZCX`), `CY` (`ZCY`), `CZ` (`ZCZ`) and `SWAP`.
+//!   `H_XY`, `H_YZ`, `H_NXY`, `H_NXZ`, `H_NYZ`, `C_XYZ`, `C_ZYX` and the
+//!   negated cycles (`C_NXYZ`, `C_XNYZ`, `C_XYNZ`, `C_NZYX`, `C_ZNYX`,
+//!   `C_ZYNX`); `II`, `CX` (`CNOT`, `ZCX`), `CY` (`ZCY`), `CZ` (`ZCZ`),
+//!   `SWAP`, `XCX`, `XCY`, `XCZ`, `YCX`, `YCY`, `YCZ`, `CXSWAP`,
+//!   `SWAPCX`, `CZSWAP` (`SWAPCZ`), `ISWAP`, `ISWAP_DAG`, `SQRT_XX`,
+//!   `SQRT_YY`, `SQRT_ZZ` and their `_DAG`s, each as a short sequence of
+//!   the simulator's gates.
 //! - **Measurements and resets:** `M` (`MZ`), `MX`, `MY`, `MR` (`MRZ`),
 //!   `MRX`, `MRY`, `R` (`RZ`), `RX`, `RY` and `MPAD`. A measurement's
 //!   argument, as in `M(0.01)`, flips the recorded result with that
 //!   probability without disturbing the state; `M !q` records it inverted.
 //! - **Pauli product measurements:** `MPP X0*Y1*Z2 !Z3*Z4 ...`, with a
-//!   flip probability as `MPP(0.01)`. Each product becomes basis changes
-//!   to Z, a ladder of CX gates onto its last qubit, a Z measurement of
-//!   that qubit and the same gates undone: the measured qubit's Z is then
-//!   the product, so the reference shot measures it on the tableau and the
-//!   frames see its parity, as for any other measurement.
+//!   flip probability as `MPP(0.01)`, and the pair forms `MXX`, `MYY`,
+//!   `MZZ`. Each product becomes basis changes to Z, a ladder of CX gates
+//!   onto its last qubit, a Z measurement of that qubit and the same
+//!   gates undone: the measured qubit's Z is then the product, so the
+//!   reference shot measures it on the tableau and the frames see its
+//!   parity, as for any other measurement.
+//! - **Pauli product rotations:** `SPP` and `SPP_DAG`, an S (or S†) on
+//!   the last qubit between the same basis changes and CX ladder.
 //! - **Noise:** `X_ERROR`, `Y_ERROR`, `Z_ERROR`, `DEPOLARIZE1`,
 //!   `DEPOLARIZE2`, `PAULI_CHANNEL_1`, `PAULI_CHANNEL_2`, and correlated
 //!   errors: `E` (`CORRELATED_ERROR`) and `ELSE_CORRELATED_ERROR`. A chain
 //!   of `E` and the `ELSE_CORRELATED_ERROR` lines right after it is one
 //!   [`Noise::Correlated`] channel (at most one of its products happens),
-//!   with the unconditional probability of each product.
+//!   with the unconditional probability of each product. `I_ERROR` and
+//!   `II_ERROR` do nothing.
+//! - **Heralded errors:** `HERALDED_ERASE` and `HERALDED_PAULI_CHANNEL_1`
+//!   record a herald per target. They run on one extra qubit after
+//!   Stim's (see `Builder::heralded`), so such a circuit has one qubit
+//!   more than Stim counts.
 //! - **Annotations:** `DETECTOR` and `OBSERVABLE_INCLUDE` with `rec[-k]`
 //!   targets; `TICK`, `QUBIT_COORDS` and `SHIFT_COORDS` are ignored
-//!   (coordinates do not change what is sampled).
+//!   (coordinates do not change what is sampled), as are tags
+//!   (`X_ERROR[leak](0.1) 0`).
 //! - **Blocks:** `REPEAT n { ... }`, nested, unrolled.
 //!
-//! Everything else (heralded errors, `MXX`/`MYY`/`MZZ` and `SPP`,
-//! classically controlled gates such as `CX rec[-1] 0`, sweep bits, ...) is rejected
-//! with the line it is on, rather than skipped: skipping an instruction
-//! would silently sample a different circuit.
+//! Everything else (classically controlled gates such as `CX rec[-1] 0`,
+//! sweep bits, ...) is rejected with the line it is on, rather than
+//! skipped: skipping an instruction would silently sample a different
+//! circuit.
 
 use std::f64::consts::FRAC_PI_2;
 
@@ -135,6 +150,15 @@ const OTHER_INSTRUCTIONS: &[&str] = &[
     "CORRELATED_ERROR",
     "ELSE_CORRELATED_ERROR",
     "MPP",
+    "MXX",
+    "MYY",
+    "MZZ",
+    "SPP",
+    "SPP_DAG",
+    "HERALDED_ERASE",
+    "HERALDED_PAULI_CHANNEL_1",
+    "I_ERROR",
+    "II_ERROR",
     "DETECTOR",
     "OBSERVABLE_INCLUDE",
 ];
@@ -145,17 +169,29 @@ pub fn parse(text: &str) -> Result<StimCircuit, String> {
     let mut next = 0;
     let mut max_qubit = None;
     let items = parse_block(&lines, &mut next, &mut max_qubit, None)?;
+    let qubits = max_qubit.map_or(0, |q| q + 1);
+    // Heralded errors record their herald on one extra qubit past Stim's.
+    let herald = heralded(&items).then_some(qubits);
     let mut builder = Builder {
         out: StimCircuit {
-            circuit: Circuit::new(max_qubit.map_or(0, |q| q + 1)),
+            circuit: Circuit::new(qubits + usize::from(herald.is_some())),
             ..StimCircuit::default()
         },
         measurements: 0,
         chain: None,
+        herald,
     };
     builder.run(&items)?;
     builder.out.circuit.num_clbits = builder.measurements;
     Ok(builder.out)
+}
+
+/// Whether any instruction, in any block, is a heralded error.
+fn heralded(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Op { name, .. } => name.starts_with("HERALDED_"),
+        Item::Repeat { body, .. } => heralded(body),
+    })
 }
 
 /// Parse lines until the end of the text, or until the `}` closing the
@@ -235,7 +271,15 @@ fn split_instruction(line: &str) -> Result<(String, Vec<f64>, &str), String> {
     if name.is_empty() {
         return Err(format!("expected an instruction, found '{line}'"));
     }
-    let rest = &line[end..];
+    let mut rest = &line[end..];
+    // A tag, as in `X_ERROR[leakage](0.1) 0`, is for tools reading the
+    // circuit and does not change what it does (Stim 1.15).
+    if let Some(inner) = rest.strip_prefix('[') {
+        let close = inner
+            .find(']')
+            .ok_or_else(|| format!("unclosed '[' in '{line}'"))?;
+        rest = &inner[close + 1..];
+    }
     if let Some(inner) = rest.strip_prefix('(') {
         let close = inner
             .find(')')
@@ -320,35 +364,149 @@ fn parse_target(word: &str) -> Result<Target, String> {
         .map_err(|_| format!("target '{word}' is not supported (qubits, !qubits and rec[-k] are)"))
 }
 
+/// One gate of a Stim gate's decomposition, on the qubits of one target
+/// (or one pair of targets) by position: `&[0]` is the first, `&[1, 0]`
+/// the pair reversed.
+type Step = (Gate, &'static [usize]);
+
 /// The gates of a Stim gate name, applied in order to each target (one
 /// qubit) or each pair of targets (two qubits).
-fn gate_sequence(name: &str) -> Option<(usize, Vec<Gate>)> {
-    let one = |gates: Vec<Gate>| Some((1, gates));
+///
+/// Every decomposition was checked against `stim.Tableau.from_named_gate`
+/// (Stim 1.16) and is pinned by the Pauli tables in `tests/stim.rs`.
+fn gate_sequence(name: &str) -> Option<(usize, &'static [Step])> {
+    const A: &[usize] = &[0];
+    const B: &[usize] = &[1];
+    const AB: &[usize] = &[0, 1];
+    const BA: &[usize] = &[1, 0];
+    // Constant tables, so that no line of an unrolled block allocates.
+    macro_rules! steps {
+        ($arity:expr, [$($step:expr),*]) => {{
+            const STEPS: &[Step] = &[$($step),*];
+            Some(($arity, STEPS))
+        }};
+    }
     match name {
-        "I" => one(vec![]),
-        "X" => one(vec![Gate::X]),
-        "Y" => one(vec![Gate::Y]),
-        "Z" => one(vec![Gate::Z]),
-        "H" | "H_XZ" => one(vec![Gate::H]),
-        "S" | "SQRT_Z" => one(vec![Gate::S]),
-        "S_DAG" | "SQRT_Z_DAG" => one(vec![Gate::Sdg]),
+        "I" => steps!(1, []),
+        "X" => steps!(1, [(Gate::X, A)]),
+        "Y" => steps!(1, [(Gate::Y, A)]),
+        "Z" => steps!(1, [(Gate::Z, A)]),
+        "H" | "H_XZ" => steps!(1, [(Gate::H, A)]),
+        "S" | "SQRT_Z" => steps!(1, [(Gate::S, A)]),
+        "S_DAG" | "SQRT_Z_DAG" => steps!(1, [(Gate::Sdg, A)]),
         // Stim's SQRT_X maps Z to -Y, as SX = H S H does.
-        "SQRT_X" => one(vec![Gate::SX]),
-        "SQRT_X_DAG" => one(vec![Gate::SXdg]),
+        "SQRT_X" => steps!(1, [(Gate::SX, A)]),
+        "SQRT_X_DAG" => steps!(1, [(Gate::SXdg, A)]),
         // Stim's SQRT_Y maps X to -Z and Z to X: RY(π/2) up to phase.
-        "SQRT_Y" => one(vec![Gate::RY(FRAC_PI_2)]),
-        "SQRT_Y_DAG" => one(vec![Gate::RY(-FRAC_PI_2)]),
+        "SQRT_Y" => steps!(1, [(Gate::RY(FRAC_PI_2), A)]),
+        "SQRT_Y_DAG" => steps!(1, [(Gate::RY(-FRAC_PI_2), A)]),
         // H_XY swaps X and Y (Z to -Z): X then S. H_YZ swaps Y and Z
         // (X to -X): SX then Z.
-        "H_XY" => one(vec![Gate::X, Gate::S]),
-        "H_YZ" => one(vec![Gate::SX, Gate::Z]),
+        "H_XY" => steps!(1, [(Gate::X, A), (Gate::S, A)]),
+        "H_YZ" => steps!(1, [(Gate::SX, A), (Gate::Z, A)]),
+        // The negated Hadamards: H_NXY maps X to -Y and Z to -Z, H_NXZ X
+        // to -Z, H_NYZ Z to -Y (and Y to -Z, X to -X).
+        "H_NXY" => steps!(1, [(Gate::S, A), (Gate::X, A)]),
+        "H_NXZ" => steps!(1, [(Gate::H, A), (Gate::Y, A)]),
+        "H_NYZ" => steps!(1, [(Gate::Y, A), (Gate::SXdg, A)]),
         // C_XYZ maps X to Y, Y to Z and Z to X: S† then H. C_ZYX undoes it.
-        "C_XYZ" => one(vec![Gate::Sdg, Gate::H]),
-        "C_ZYX" => one(vec![Gate::H, Gate::S]),
-        "CX" | "CNOT" | "ZCX" => Some((2, vec![Gate::CX])),
-        "CY" | "ZCY" => Some((2, vec![Gate::CY])),
-        "CZ" | "ZCZ" => Some((2, vec![Gate::CZ])),
-        "SWAP" => Some((2, vec![Gate::SWAP])),
+        "C_XYZ" => steps!(1, [(Gate::Sdg, A), (Gate::H, A)]),
+        "C_ZYX" => steps!(1, [(Gate::H, A), (Gate::S, A)]),
+        // The same cycles with one axis negated (shortest sequences found
+        // by search over H, S, S†, SX, SX† and the Paulis).
+        "C_NXYZ" => steps!(1, [(Gate::SX, A), (Gate::Sdg, A)]),
+        "C_XNYZ" => steps!(1, [(Gate::H, A), (Gate::SX, A)]),
+        "C_XYNZ" => steps!(1, [(Gate::SXdg, A), (Gate::S, A)]),
+        "C_NZYX" => steps!(1, [(Gate::Sdg, A), (Gate::SX, A)]),
+        "C_ZNYX" => steps!(1, [(Gate::H, A), (Gate::Sdg, A)]),
+        "C_ZYNX" => steps!(1, [(Gate::S, A), (Gate::SXdg, A)]),
+        "II" => steps!(2, []),
+        "CX" | "CNOT" | "ZCX" => steps!(2, [(Gate::CX, AB)]),
+        "CY" | "ZCY" => steps!(2, [(Gate::CY, AB)]),
+        "CZ" | "ZCZ" => steps!(2, [(Gate::CZ, AB)]),
+        "SWAP" => steps!(2, [(Gate::SWAP, AB)]),
+        // Controls in the X or Y basis: the control rotated into Z around a
+        // CX or CY. XCZ and YCZ are CX and CY with the roles swapped.
+        "XCX" => steps!(2, [(Gate::H, A), (Gate::CX, AB), (Gate::H, A)]),
+        "XCY" => steps!(2, [(Gate::H, A), (Gate::CY, AB), (Gate::H, A)]),
+        "XCZ" => steps!(2, [(Gate::CX, BA)]),
+        "YCX" => steps!(
+            2,
+            [
+                (Gate::Sdg, A),
+                (Gate::H, A),
+                (Gate::CX, AB),
+                (Gate::H, A),
+                (Gate::S, A)
+            ]
+        ),
+        "YCY" => steps!(
+            2,
+            [
+                (Gate::Sdg, A),
+                (Gate::H, A),
+                (Gate::CY, AB),
+                (Gate::H, A),
+                (Gate::S, A)
+            ]
+        ),
+        "YCZ" => steps!(2, [(Gate::CY, BA)]),
+        // CXSWAP is CX then SWAP; SWAPCX the other order.
+        "CXSWAP" => steps!(2, [(Gate::CX, AB), (Gate::SWAP, AB)]),
+        "SWAPCX" => steps!(2, [(Gate::SWAP, AB), (Gate::CX, AB)]),
+        "CZSWAP" | "SWAPCZ" => steps!(2, [(Gate::CZ, AB), (Gate::SWAP, AB)]),
+        // ISWAP = (S ⊗ S) SWAP CZ as a circuit: CZ first, then the swap,
+        // then S on both; ISWAP_DAG is its inverse.
+        "ISWAP" => steps!(2, [(Gate::CZ, AB), (Gate::SWAP, AB), (Gate::S, AB)]),
+        "ISWAP_DAG" => steps!(2, [(Gate::Sdg, AB), (Gate::SWAP, AB), (Gate::CZ, AB)]),
+        // exp(∓iπ/4 P⊗P) up to phase: both qubits rotated so that P becomes
+        // Z, then exp(∓iπ/4 Z⊗Z) = CX (I ⊗ S^±1) CX, then rotated back.
+        "SQRT_ZZ" => steps!(2, [(Gate::CX, AB), (Gate::S, B), (Gate::CX, AB)]),
+        "SQRT_ZZ_DAG" => steps!(2, [(Gate::CX, AB), (Gate::Sdg, B), (Gate::CX, AB)]),
+        "SQRT_XX" => steps!(
+            2,
+            [
+                (Gate::H, AB),
+                (Gate::CX, AB),
+                (Gate::S, B),
+                (Gate::CX, AB),
+                (Gate::H, AB)
+            ]
+        ),
+        "SQRT_XX_DAG" => steps!(
+            2,
+            [
+                (Gate::H, AB),
+                (Gate::CX, AB),
+                (Gate::Sdg, B),
+                (Gate::CX, AB),
+                (Gate::H, AB)
+            ]
+        ),
+        "SQRT_YY" => steps!(
+            2,
+            [
+                (Gate::Sdg, AB),
+                (Gate::H, AB),
+                (Gate::CX, AB),
+                (Gate::S, B),
+                (Gate::CX, AB),
+                (Gate::H, AB),
+                (Gate::S, AB)
+            ]
+        ),
+        "SQRT_YY_DAG" => steps!(
+            2,
+            [
+                (Gate::Sdg, AB),
+                (Gate::H, AB),
+                (Gate::CX, AB),
+                (Gate::Sdg, B),
+                (Gate::CX, AB),
+                (Gate::H, AB),
+                (Gate::S, AB)
+            ]
+        ),
         _ => None,
     }
 }
@@ -373,6 +531,9 @@ struct Builder {
     /// [`Noise::Correlated`] instruction, which a following
     /// `ELSE_CORRELATED_ERROR` extends.
     chain: Option<usize>,
+    /// The extra qubit that records heralds, if the circuit has heralded
+    /// errors.
+    herald: Option<usize>,
 }
 
 impl Builder {
@@ -476,8 +637,21 @@ impl Builder {
                 if arity == 2 && chunk[0] == chunk[1] {
                     return Err(format!("{name} on qubit {} twice", chunk[0]));
                 }
-                for gate in &gates {
-                    circuit.gate(gate.clone(), chunk);
+                for (gate, at) in gates {
+                    if gate.arity() == at.len() {
+                        // On the stack: this runs for every target pair of
+                        // every unrolled line.
+                        let mut on = [0usize; 2];
+                        for (o, &i) in on.iter_mut().zip(at.iter()) {
+                            *o = chunk[i];
+                        }
+                        circuit.gate(gate.clone(), &on[..at.len()]);
+                    } else {
+                        // A one-qubit gate on each listed qubit.
+                        for &i in at.iter() {
+                            circuit.gate(gate.clone(), &[chunk[i]]);
+                        }
+                    }
                 }
             }
             return Ok(());
@@ -607,7 +781,63 @@ impl Builder {
             "E" | "CORRELATED_ERROR" | "ELSE_CORRELATED_ERROR" => {
                 self.correlated(name, args, targets)?;
             }
-            "MPP" => self.mpp(args, targets)?,
+            "MPP" => {
+                let flip = Self::flip(name, args)?;
+                for (factors, inverted) in Self::products(name, targets)? {
+                    self.measure_product(&factors, inverted, flip);
+                }
+            }
+            "MXX" | "MYY" | "MZZ" => {
+                // Two-qubit parity measurements: MXX a b is MPP Xa*Xb.
+                let flip = Self::flip(name, args)?;
+                let pauli = name.as_bytes()[1];
+                if !targets.len().is_multiple_of(2) {
+                    return Err(format!("{name} needs pairs of targets"));
+                }
+                for pair in targets.chunks(2) {
+                    let mut factors = Vec::new();
+                    let mut inverted = false;
+                    for target in pair {
+                        match *target {
+                            Target::Qubit(q) => factors.push((pauli, q)),
+                            Target::Inverted(q) => {
+                                factors.push((pauli, q));
+                                inverted = !inverted;
+                            }
+                            _ => return Err(format!("{name} takes qubit targets")),
+                        }
+                    }
+                    if factors[0].1 == factors[1].1 {
+                        return Err(format!("{name} on qubit {} twice", factors[0].1));
+                    }
+                    self.measure_product(&factors, inverted, flip);
+                }
+            }
+            "SPP" | "SPP_DAG" => {
+                Self::no_args(name, args)?;
+                for (factors, inverted) in Self::products(name, targets)? {
+                    // S phases the -1 eigenspace of Z by i; SPP does the
+                    // same for the product. On `-P` (an inverted product)
+                    // that is the +1 eigenspace of P: S† up to phase.
+                    let s = if (name == "SPP") != inverted {
+                        Gate::S
+                    } else {
+                        Gate::Sdg
+                    };
+                    self.on_product(&factors, |circuit, last| {
+                        circuit.gate(s.clone(), &[last]);
+                    });
+                }
+            }
+            "HERALDED_ERASE" | "HERALDED_PAULI_CHANNEL_1" => self.heralded(name, args, targets)?,
+            "I_ERROR" | "II_ERROR" => {
+                // Identity channels (placeholders for tools): any
+                // arguments, no effect.
+                let qubits = Self::qubits(name, targets, false)?;
+                if name == "II_ERROR" && !qubits.len().is_multiple_of(2) {
+                    return Err("II_ERROR needs pairs of targets".into());
+                }
+            }
             "DETECTOR" => {
                 // Arguments are coordinates, which do not change sampling.
                 let records = self.records(name, targets)?;
@@ -708,20 +938,22 @@ impl Builder {
         Ok(())
     }
 
-    /// `MPP`: measure each Pauli product. For a product `P1 ⊗ ... ⊗ Pk`
-    /// on qubits `q1..qk`, each `qi` is rotated so that its `Pi` becomes
-    /// Z (`U_i† Z U_i = P_i`, the same rotations as `MX` and `MY`), CX
-    /// gates from `q1..q(k-1)` onto `qk` turn `Z_qk` into `Z_q1 ... Z_qk`,
-    /// and `qk` is measured in Z. Undoing the CX gates and the rotations
-    /// leaves the state as a direct product measurement would: in the
-    /// frames, the random Z put on `qk` after the measurement becomes the
-    /// measured product, which is what Stim applies after an `MPP`.
-    fn mpp(&mut self, args: &[f64], targets: &[Target]) -> Result<(), String> {
+    /// The flip probability of a measurement, `M(p)` or `MPP(p)`: at most
+    /// one argument.
+    fn flip(name: &str, args: &[f64]) -> Result<f64, String> {
         if args.len() > 1 {
-            return Err("MPP takes at most one argument".into());
+            return Err(format!("{name} takes at most one argument"));
         }
-        Self::probability("MPP", args, args.len())?;
-        let flip = args.first().copied().unwrap_or(0.0);
+        Self::probability(name, args, args.len())?;
+        Ok(args.first().copied().unwrap_or(0.0))
+    }
+
+    /// The Pauli products of `MPP` or `SPP` targets (`X0*Y1*Z2 !Z3`):
+    /// each one's factors (letter, qubit) and whether an odd number of
+    /// them was written inverted.
+    #[allow(clippy::type_complexity)]
+    fn products(name: &str, targets: &[Target]) -> Result<Vec<(Vec<(u8, usize)>, bool)>, String> {
+        let mut out = Vec::new();
         let mut start = 0;
         while start < targets.len() {
             // The product: targets up to the first one not joined by `*`.
@@ -730,7 +962,7 @@ impl Builder {
                 match targets[end] {
                     Target::Pauli { joined: true, .. } if end + 1 < targets.len() => end += 1,
                     Target::Pauli { joined: false, .. } => break,
-                    _ => return Err("MPP takes Pauli products such as X0*Y1*Z2".into()),
+                    _ => return Err(format!("{name} takes Pauli products such as X0*Y1*Z2")),
                 }
             }
             let mut factors = Vec::new();
@@ -744,45 +976,108 @@ impl Builder {
                 } = *target
                 {
                     if factors.iter().any(|&(_, q)| q == qubit) {
-                        return Err(format!("MPP: qubit {qubit} appears twice in one product"));
+                        return Err(format!(
+                            "{name}: qubit {qubit} appears twice in one product"
+                        ));
                     }
                     factors.push((pauli, qubit));
                     inverted ^= bang;
                 }
             }
             start = end + 1;
-            let circuit = &mut self.out.circuit;
-            let rotation = |pauli: u8| match pauli {
-                b'X' => basis("MX"),
-                b'Y' => basis("MY"),
-                _ => basis("MZ"),
-            };
-            let (_, last) = *factors.last().expect("at least one factor");
-            for &(pauli, q) in &factors {
-                for gate in rotation(pauli).0 {
-                    circuit.gate(gate.clone(), &[q]);
-                }
+            out.push((factors, inverted));
+        }
+        Ok(out)
+    }
+
+    /// Run `inner` on the last qubit `qk` of the product `P1 ⊗ ... ⊗ Pk`
+    /// (on `q1..qk`) after mapping the product onto `Z_qk`, then map it
+    /// back. Each `qi` is rotated so that its `Pi` becomes Z
+    /// (`U_i† Z U_i = P_i`, the same rotations as `MX` and `MY`), and CX
+    /// gates from `q1..q(k-1)` onto `qk` turn `Z_qk` into
+    /// `Z_q1 ... Z_qk`. A Z measurement of `qk` in between is then a
+    /// measurement of the product, and an S on `qk` is `SPP` of it.
+    fn on_product(&mut self, factors: &[(u8, usize)], inner: impl FnOnce(&mut Circuit, usize)) {
+        let circuit = &mut self.out.circuit;
+        let rotation = |pauli: u8| match pauli {
+            b'X' => basis("MX"),
+            b'Y' => basis("MY"),
+            _ => basis("MZ"),
+        };
+        let (_, last) = *factors.last().expect("at least one factor");
+        for &(pauli, q) in factors {
+            for gate in rotation(pauli).0 {
+                circuit.gate(gate.clone(), &[q]);
             }
-            for &(_, q) in &factors[..factors.len() - 1] {
-                circuit.gate(Gate::CX, &[q, last]);
+        }
+        for &(_, q) in &factors[..factors.len() - 1] {
+            circuit.gate(Gate::CX, &[q, last]);
+        }
+        inner(circuit, last);
+        for &(_, q) in factors[..factors.len() - 1].iter().rev() {
+            circuit.gate(Gate::CX, &[q, last]);
+        }
+        for &(pauli, q) in factors {
+            for gate in rotation(pauli).1 {
+                circuit.gate(gate.clone(), &[q]);
             }
-            let m = self.measurements;
+        }
+    }
+
+    /// Measure one Pauli product (`MPP`, `MXX`, ...) into the next
+    /// record. Undoing the CX gates and the rotations of
+    /// [`Self::on_product`] leaves the state as a direct product
+    /// measurement would: in the frames, the random Z put on `qk` after
+    /// the measurement becomes the measured product, which is what Stim
+    /// applies after an `MPP`.
+    fn measure_product(&mut self, factors: &[(u8, usize)], inverted: bool, flip: f64) {
+        let m = self.measurements;
+        self.on_product(factors, |circuit, last| {
             circuit.measure(last, m);
+        });
+        self.measurements += 1;
+        if flip > 0.0 {
+            self.out.flips.push((m, flip));
+        }
+        if inverted {
+            self.out.inverted.push(m);
+        }
+    }
+
+    /// `HERALDED_ERASE(p)` and `HERALDED_PAULI_CHANNEL_1(pI, pX, pY, pZ)`:
+    /// on each target, with probability `p` (or `pI + pX + pY + pZ`) a
+    /// herald records 1 and the qubit takes a Pauli (uniform for an
+    /// erasure, `pI : pX : pY : pZ` for the channel); otherwise the
+    /// herald records 0 and nothing happens.
+    ///
+    /// The herald is a qubit of its own, `h`, in `|0>`: a correlated
+    /// error puts `X_h` together with the Pauli on the target (`X_h I`,
+    /// `X_h X`, `X_h Y`, `X_h Z`, at most one of them), `h` is measured
+    /// into the record and reset. The event and the herald are then
+    /// exactly as correlated as in Stim, and `h` touches nothing else.
+    fn heralded(&mut self, name: &str, args: &[f64], targets: &[Target]) -> Result<(), String> {
+        let probabilities = if name == "HERALDED_ERASE" {
+            Self::probability(name, args, 1)?;
+            [args[0] / 4.0; 4]
+        } else {
+            Self::probability(name, args, 4)?;
+            [args[0], args[1], args[2], args[3]]
+        };
+        let herald = self.herald.expect("parse adds the herald qubit");
+        for q in Self::qubits(name, targets, false)? {
+            let circuit = &mut self.out.circuit;
+            let products: Vec<(f64, String)> = probabilities
+                .iter()
+                .zip(["XI", "XX", "XY", "XZ"])
+                .filter(|(p, _)| **p > 0.0)
+                .map(|(&p, paulis)| (p, paulis.to_string()))
+                .collect();
+            if !products.is_empty() {
+                circuit.noise(Noise::Correlated(products), &[herald, q]);
+            }
+            circuit.measure(herald, self.measurements);
+            circuit.reset(herald);
             self.measurements += 1;
-            for &(_, q) in factors[..factors.len() - 1].iter().rev() {
-                circuit.gate(Gate::CX, &[q, last]);
-            }
-            for &(pauli, q) in &factors {
-                for gate in rotation(pauli).1 {
-                    circuit.gate(gate.clone(), &[q]);
-                }
-            }
-            if flip > 0.0 {
-                self.out.flips.push((m, flip));
-            }
-            if inverted {
-                self.out.inverted.push(m);
-            }
         }
         Ok(())
     }

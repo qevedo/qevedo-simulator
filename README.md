@@ -295,10 +295,20 @@ the reference state vector, `PAULI_CHANNEL_2`'s order against Stim's,
 and correlated chains and both channels against distributions summed
 exactly over every error.
 
-What is not there yet: heralded errors, `MXX`/`MYY`/`MZZ` and `SPP`,
-classically controlled gates and sweep bits in the reader (each is an
-error naming the line, never skipped), writing detectors in `to_stim`,
-and noise on the state-vector and MPS backends.
+The reader takes every instruction of Stim 1.16 except classically
+controlled gates (`CX rec[-1] 0`) and sweep bits: all of Stim's Clifford
+gates (`ISWAP`, `SQRT_XX`, `XCY`, `CXSWAP`, `C_NXYZ`, ...), two-qubit
+parity measurements (`MXX`, `MYY`, `MZZ`), `SPP`/`SPP_DAG`, heralded
+errors (`HERALDED_ERASE`, `HERALDED_PAULI_CHANNEL_1`, run on one extra
+qubit that records the herald) and tags (`X_ERROR[leak](0.1) 0`). In the
+Python tests, 300 random circuits of all of these give the same outcome
+spaces and rates as Stim, and a repetition code on erasure qubits with
+heralds and `MZZ(p)` fires every detector at Stim's rate; the Rust tests
+pin each gate's Pauli table to Stim's and `SPP` to its matrix.
+
+What is not there yet: classically controlled gates and sweep bits in the
+reader (each is an error naming the line, never skipped), writing
+detectors in `to_stim`, and noise on the state-vector and MPS backends.
 
 ### Low-entanglement circuits (MPS)
 
