@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "qvd"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "approx",
  "core_affinity",
