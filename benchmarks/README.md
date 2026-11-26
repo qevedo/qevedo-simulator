@@ -30,6 +30,7 @@ benchmarks/
 ├── bench_output.py             sample / sample_detectors, bool and bit-packed -> output.csv
 ├── compare_builds.py           two builds interleaved -> output_before_after.csv
 ├── bench_mpp.py                MPP, PAULI_CHANNEL_2 and correlated errors -> mpp*.csv
+├── compare_feedback_stim.py    random circuits with classical feedback against Stim (pass/fail)
 ├── compare_examples.py         the Rust examples of two builds interleaved -> examples_before_after.csv
 ├── compare_mps.py              times Qiskit Aer's and quimb's MPS simulators
 ├── compare_nearclifford.py     times Qiskit Aer's methods on Clifford+T circuits

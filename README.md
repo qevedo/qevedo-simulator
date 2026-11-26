@@ -315,7 +315,8 @@ result differs; the state vector runs it shot by shot. The Rust tests
 check both against distributions summed exactly over every outcome and
 error; 600 random circuits with feedback, flipped and inverted records,
 `MPAD`, `MPP` and noise give the same outcome spaces, rates, pair
-correlations and detector rates as Stim.
+correlations and detector rates as Stim
+(`benchmarks/compare_feedback_stim.py 600 2026`).
 
 What is not there yet: sweep data (sweep bits always read 0), feedback on
 the MPS and near-Clifford backends, writing detectors in `to_stim`, and

@@ -67,7 +67,7 @@ distributions today.
 - Python against Stim: `test_feedback_matches_stim_on_random_circuits`
   (200 circuits, same affine outcome space and rates) and a repetition
   code reset by feedback after `M(0.05)` (detector, observable and joint
-  rates at Stim's within 5σ, 200,000 shots). A one-off script: 600 random
+  rates at Stim's within 5σ, 200,000 shots). `benchmarks/compare_feedback_stim.py 600 2026`: 600 random
   circuits with 1001 controlled lines, flips, inversions, `MPAD`, `MPP`,
   sweep bits and noise: 0 differences (outcome sets and rates for the
   noiseless half; rates, every pair's XOR and detector rates for the
