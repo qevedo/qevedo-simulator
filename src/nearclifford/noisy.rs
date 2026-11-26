@@ -277,6 +277,7 @@ fn compile<'a>(
                 }
             }
             Instruction::Barrier { .. } => {}
+            Instruction::Feedback { .. } => unreachable!("rejected by run"),
         }
     }
     Ok((ops, frame.peak_active_qubits(), gates))

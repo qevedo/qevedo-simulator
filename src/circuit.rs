@@ -228,6 +228,43 @@ pub enum Instruction {
         channel: Noise,
         qubits: Vec<usize>,
     },
+    /// Classical feedback: `pauli` on `qubit` if classical bit `clbit`
+    /// reads 1 at this point (the latest result written to it, 0 if none
+    /// was). Stim's `CX rec[-1] q` is `Feedback { pauli: X, .. }`. The
+    /// stabilizer and state-vector backends run it.
+    Feedback {
+        pauli: Pauli,
+        qubit: usize,
+        clbit: usize,
+    },
+}
+
+/// A one-qubit Pauli, the gate of a [`Instruction::Feedback`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pauli {
+    X,
+    Y,
+    Z,
+}
+
+impl Pauli {
+    /// The Pauli as a gate.
+    pub fn gate(self) -> Gate {
+        match self {
+            Pauli::X => Gate::X,
+            Pauli::Y => Gate::Y,
+            Pauli::Z => Gate::Z,
+        }
+    }
+
+    /// Its letter, `X`, `Y` or `Z`.
+    pub fn letter(self) -> char {
+        match self {
+            Pauli::X => 'X',
+            Pauli::Y => 'Y',
+            Pauli::Z => 'Z',
+        }
+    }
 }
 
 /// A Pauli noise channel: with some probability a random Pauli error,
@@ -513,6 +550,26 @@ impl Circuit {
         self
     }
 
+    /// Classical feedback: `pauli` on `qubit` if classical bit `clbit`
+    /// reads 1 (see [`Instruction::Feedback`]).
+    pub fn feedback(&mut self, pauli: Pauli, qubit: usize, clbit: usize) -> &mut Self {
+        assert!(qubit < self.num_qubits, "qubit {qubit} out of range");
+        self.num_clbits = self.num_clbits.max(clbit + 1);
+        self.instructions.push(Instruction::Feedback {
+            pauli,
+            qubit,
+            clbit,
+        });
+        self
+    }
+
+    /// Whether the circuit contains classical feedback.
+    pub fn has_feedback(&self) -> bool {
+        self.instructions
+            .iter()
+            .any(|i| matches!(i, Instruction::Feedback { .. }))
+    }
+
     /// Add a noise channel on `qubits` (pairs of qubits for the two-qubit
     /// channels, groups as long as the products for [`Noise::Correlated`]).
     pub fn noise(&mut self, channel: Noise, qubits: &[usize]) -> &mut Self {
@@ -656,6 +713,12 @@ impl Circuit {
                 Instruction::Barrier { .. } => out.push_str("barrier q;\n"),
                 Instruction::Noise { .. } => {
                     return Err("noise channels cannot be written as OpenQASM 2".into());
+                }
+                Instruction::Feedback { .. } => {
+                    // OpenQASM 2's `if` compares a whole register.
+                    return Err(
+                        "feedback on one classical bit cannot be written as OpenQASM 2".into(),
+                    );
                 }
             }
         }

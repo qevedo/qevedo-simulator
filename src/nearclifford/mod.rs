@@ -201,6 +201,9 @@ fn toffoli(a: usize, b: usize, t: usize) -> Vec<Step> {
 pub fn is_supported(circuit: &Circuit) -> bool {
     circuit.instructions.iter().all(|i| match i {
         Instruction::Gate { gate, qubits } => decompose(gate, qubits).is_some(),
+        // The shots' branches share one record per group of shots, not
+        // one per shot, so a Pauli that depends on a result has no place.
+        Instruction::Feedback { .. } => false,
         _ => true,
     })
 }
@@ -240,6 +243,7 @@ pub fn peak_active_qubits(circuit: &Circuit) -> Option<usize> {
             }
             Instruction::Reset { qubit } => state.reset(*qubit, &mut rng),
             Instruction::Barrier { .. } | Instruction::Noise { .. } => {}
+            Instruction::Feedback { .. } => unreachable!("not supported"),
         }
     }
     Some(state.peak_active_qubits())
@@ -885,7 +889,9 @@ fn branch(
                     continue;
                 }
                 Instruction::Barrier { .. } => continue,
-                Instruction::Noise { .. } => unreachable!("rejected by run"),
+                Instruction::Noise { .. } | Instruction::Feedback { .. } => {
+                    unreachable!("rejected by run")
+                }
                 Instruction::Reset { qubit } => (*qubit, None),
                 Instruction::Measure { qubit, clbit } => {
                     // Gather the run of measurements on distinct qubits.
@@ -1459,6 +1465,9 @@ pub fn run(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<RunResu
         Some(seed) => Pcg64::seed_from_u64(seed),
         None => Pcg64::from_rng(&mut rand::rng()),
     };
+    if circuit.has_feedback() {
+        return Err(crate::simulator::FEEDBACK_BACKENDS.into());
+    }
     if !is_supported(circuit) {
         return Err("the circuit has gates the near-Clifford backend does not support".into());
     }

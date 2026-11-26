@@ -229,8 +229,10 @@ def from_stim(text) -> tuple[Circuit, list[list[int]], list[list[int]]]:
     classical bit ``m``; ``REPEAT`` blocks are unrolled), the detectors and
     the observables, each a list of measurement indices. A circuit with
     heralded errors has one extra qubit, after Stim's, that records the
-    heralds. Fails on instructions Qevedo cannot run (classically
-    controlled gates, sweep bits), naming the line.
+    heralds; so does one with classical feedback (``CX rec[-1] q``) and
+    flipped measurements (``M(p)``). Sweep bits read 0. Fails on
+    instructions Qevedo cannot run (a record as a gate's target), naming
+    the line.
     """
     return _circuit_from_stim(str(text))
 

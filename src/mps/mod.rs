@@ -41,11 +41,12 @@ const SHOT_BATCH: usize = 256;
 /// Apply the gates of `circuit` (measurements and resets are not allowed).
 pub fn simulate(circuit: &Circuit, truncation: Truncation) -> Mps {
     let mut mps = Mps::with_order(&qubit_order(circuit), truncation);
-    if let Some(other) = circuit
-        .instructions
-        .iter()
-        .find(|i| matches!(i, Instruction::Measure { .. } | Instruction::Reset { .. }))
-    {
+    if let Some(other) = circuit.instructions.iter().find(|i| {
+        matches!(
+            i,
+            Instruction::Measure { .. } | Instruction::Reset { .. } | Instruction::Feedback { .. }
+        )
+    }) {
         panic!("simulate covers unitary circuits only, found {other:?}");
     }
     apply_gates(&mut mps, &circuit.instructions);

@@ -323,8 +323,21 @@ same basis changes and CX ladder that `MPP` uses. A heralded error on
 `q` is a correlated error `X_h ⊗ {I, X, Y, Z}_q` (at most one product)
 on an extra qubit `h` in `|0>`, which is then measured into the herald's
 record and reset: herald and Pauli are exactly as correlated as in Stim.
-Anything it cannot run exactly (classically controlled gates, sweep
-bits) is an error naming the line, never skipped. Five details:
+Anything it cannot run exactly is an error naming the line, never
+skipped. Six details:
+- *Feedback in the frames.* `CX rec[-k] q` is `Instruction::Feedback`:
+  X on `q` when the record reads 1. The reference shot applies it on
+  its own result `r`. A shot's result is `r` XOR its frame's flip `f`,
+  so it needs `X^(r ⊕ f)`, which is the reference's `X^r` times `X^f`:
+  the frame XORs the shot's flip bits, already in the record, into its
+  X component (Z for `CZ`, both for `CY`). No new random draws, so the
+  noiseless and noisy paths are unchanged. Stim's feedback reads the
+  record after its flip (`M(p)`); the reader's flips are applied after
+  the run, so in a circuit with feedback a flipped measurement instead
+  copies Z of `q` onto a scratch qubit in `|0>` (CX q→s), puts the
+  flip on the copy as an X error, measures and resets it. Measuring the
+  copy collapses `q` as measuring `q` would. An inverted record (`M !q`,
+  `MPAD 1`) is the Pauli unconditionally, then the feedback.
 - *Detection events are relative to the reference shot.* A detector fires
   when its measurements' parity differs from the noiseless circuit's, as in
   Stim. The sampler's reference shot is that noiseless run, so
@@ -997,8 +1010,7 @@ remain (79 of its 87 s at 5 steps, θ_h = 1.2).
 - **Noise on more backends, and more of Stim's format.** The state
   vector and MPS backends do not take noise (trajectories would). The
   near-Clifford backend does not read Stim's format or return detection
-  events. The Stim reader lacks classical control from measurement
-  records and sweep bits, and
+  events. The Stim reader has no sweep data (sweep bits read 0), and
   `to_stim` does not write detectors. `sample_detectors` keeps
   every measurement record in memory (one bit per measurement and shot)
   before reducing them to detectors. Sampling detectors directly, with a cost that

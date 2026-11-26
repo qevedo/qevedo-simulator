@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use qvd::threads::{Placement, pool};
-use qvd::{Backend, Circuit, Gate, Instruction, Matrix, Noise, Options};
+use qvd::{Backend, Circuit, Gate, Instruction, Matrix, Noise, Options, Pauli};
 
 /// A quantum circuit: gates, measurements, resets, barriers and Pauli noise
 /// channels on numbered qubits and classical bits (qubit 0 is the least significant bit, as in
@@ -215,6 +215,27 @@ impl PyCircuit {
         Ok(slf)
     }
 
+    /// Classical feedback: the Pauli `pauli` (`"X"`, `"Y"` or `"Z"`) on
+    /// `qubit` if classical bit `clbit` reads 1 at this point (its latest
+    /// measurement result, 0 if none). Stim's `CX rec[-1] q`; the
+    /// stabilizer and state-vector backends run it.
+    fn feedback<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        pauli: &str,
+        qubit: usize,
+        clbit: usize,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let pauli = match pauli {
+            "X" | "x" => Pauli::X,
+            "Y" | "y" => Pauli::Y,
+            "Z" | "z" => Pauli::Z,
+            _ => return Err(value_error(format!("pauli must be X, Y or Z, not {pauli:?}"))),
+        };
+        slf.check(&[qubit])?;
+        slf.inner.feedback(pauli, qubit, clbit);
+        Ok(slf)
+    }
+
     fn barrier(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf.inner.barrier();
         slf
@@ -330,7 +351,8 @@ impl PyCircuit {
     }
 
     /// The instructions as `(name, qubits, params)` tuples; `params` holds
-    /// the classical bit for measurements, is empty for unitaries, and holds
+    /// the classical bit for measurements and for feedback (`feedback_x`,
+    /// `feedback_y`, `feedback_z`), is empty for unitaries, and holds
     /// the probabilities of noise channels (named as in Stim, lower case; a
     /// chain of correlated errors read from Stim is `correlated_error` with
     /// each product's unconditional probability, its Pauli products are in
@@ -353,6 +375,15 @@ impl PyCircuit {
                     let (name, params) = channel.stim_name();
                     (name.to_lowercase(), qubits.clone(), params)
                 }
+                Instruction::Feedback {
+                    pauli,
+                    qubit,
+                    clbit,
+                } => (
+                    format!("feedback_{}", pauli.letter().to_ascii_lowercase()),
+                    vec![*qubit],
+                    vec![*clbit as f64],
+                ),
             })
             .collect()
     }

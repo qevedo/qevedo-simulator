@@ -85,10 +85,14 @@ measurement-flip probabilities (`M(0.01)`) and inverted targets (`M !3`),
 `SPP`/`SPP_DAG`, the Pauli channels including `PAULI_CHANNEL_2`,
 correlated errors (`E`, `ELSE_CORRELATED_ERROR`), heralded errors
 (`HERALDED_ERASE`, `HERALDED_PAULI_CHANNEL_1`), tags, `DETECTOR`,
-`OBSERVABLE_INCLUDE` and nested `REPEAT` blocks; classically controlled
-gates and sweep bits are an error naming the line. A circuit with
-heralded errors gets one extra qubit, after Stim's, that records the
-heralds. A chain of correlated errors read from Stim appears in
+`OBSERVABLE_INCLUDE`, nested `REPEAT` blocks and classical feedback
+(`CX rec[-1] 5`, `CY`, `CZ`, `XCZ`, `YCZ`; sweep bits read 0, as in
+Stim without sweep data). A circuit with heralded errors gets one extra
+qubit, after Stim's, that records the heralds; so does one with feedback
+and flipped measurements (`M(0.01)`), whose flips then happen in the shot,
+where feedback reads them. A Qevedo circuit takes feedback with
+`circuit.feedback("X", qubit, clbit)` (X on `qubit` if bit `clbit` is
+1), on the stabilizer and state-vector backends. A chain of correlated errors read from Stim appears in
 `instructions()` as one `correlated_error` with each product's
 unconditional probability; `to_stim()` writes it back as the chain.
 

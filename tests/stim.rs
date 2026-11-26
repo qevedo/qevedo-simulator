@@ -89,9 +89,22 @@ fn errors_name_the_line() {
             "line 1: PAULI_CHANNEL_2 takes 15 probability",
         ),
         (
-            "M 0\nCX rec[-1] 1\n",
-            "line 2: CX with measurement record targets",
+            "M 0\nCX 1 rec[-1]\n",
+            "line 2: CX with a classical target would edit the measurement record",
         ),
+        (
+            "M 0\nXCZ rec[-1] 1\n",
+            "line 2: XCZ with a classical target would edit",
+        ),
+        (
+            "M 0\nXCX rec[-1] 1\n",
+            "line 2: XCX takes no measurement record or sweep bit targets",
+        ),
+        (
+            "M 0\nCX rec[-2] 1\n",
+            "line 2: rec[-2] refers to a measurement before",
+        ),
+        ("M 0\nCX rec[-1]\n", "line 2: CX needs pairs of targets"),
         (
             "M 0\nDETECTOR rec[-2]\n",
             "line 2: rec[-2] refers to a measurement before",
@@ -107,7 +120,11 @@ fn errors_name_the_line() {
             "line 1: DEPOLARIZE2 needs pairs of distinct qubits",
         ),
         ("CZ 0 1 2\n", "line 1: CZ needs pairs of targets"),
-        ("H sweep[0]\n", "line 1: target 'sweep[0]' is not supported"),
+        (
+            "H sweep[0]\n",
+            "line 1: H takes no measurement record or sweep bit targets",
+        ),
+        ("H swept[0]\n", "line 1: target 'swept[0]' is not supported"),
         (
             "REPEAT 2 {\n  REPEAT 2 {\n    FOO 0\n  }\n}\n",
             "line 3: Stim instruction FOO",
@@ -900,4 +917,134 @@ fn new_channels_round_trip_through_to_stim() {
     };
     assert_eq!(products[0], (0.1, "XZI".to_string()));
     assert!((products[1].0 - 0.18).abs() < 1e-15 && products[1].1 == "IIY");
+}
+
+#[test]
+fn classical_control_reads_the_record() {
+    use qvd::Pauli;
+    let feedback = |pauli, qubit, clbit| Instruction::Feedback {
+        pauli,
+        qubit,
+        clbit,
+    };
+    let x = |q: usize| Instruction::Gate {
+        gate: Gate::X,
+        qubits: vec![q],
+    };
+    // Each controlled gate's Pauli, on the side Stim puts it; a pair of
+    // qubits on the same line stays a gate; CZ between classical bits and
+    // sweep bits (0 without sweep data) do nothing.
+    let c = parse(
+        "M 0 1\nCX rec[-1] 2 0 2\nCY rec[-2] 3\nCZ 3 rec[-1] rec[-2] 2\nXCZ 2 rec[-1]\n\
+         YCZ 3 rec[-2]\nZCX rec[-1] 3\nCNOT rec[-2] 2\nZCY rec[-1] 2\nZCZ rec[-2] 3\n\
+         CZ rec[-1] rec[-2]\nCX sweep[0] 2\nCZ 3 sweep[4]\n",
+    )
+    .unwrap();
+    assert_eq!(c.circuit.num_qubits, 4);
+    let tail: Vec<Instruction> = c.circuit.instructions[2..]
+        .iter()
+        .filter(|i| matches!(i, Instruction::Feedback { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            feedback(Pauli::X, 2, 1),
+            feedback(Pauli::Y, 3, 0),
+            feedback(Pauli::Z, 3, 1),
+            feedback(Pauli::Z, 2, 0),
+            feedback(Pauli::X, 2, 1),
+            feedback(Pauli::Y, 3, 0),
+            feedback(Pauli::X, 3, 1),
+            feedback(Pauli::X, 2, 0),
+            feedback(Pauli::Y, 2, 1),
+            feedback(Pauli::Z, 3, 0),
+        ]
+    );
+    assert_eq!(c.circuit.instructions.len(), 2 + 1 + tail.len());
+    // An inverted record is the Pauli always, then the Pauli on the
+    // result; MPAD 1 likewise, MPAD 0 never writes its bit.
+    let c = parse("M !0\nCX rec[-1] 1\nMPAD 1 0\nCZ rec[-2] 1 rec[-1] 1\n").unwrap();
+    assert_eq!(
+        c.circuit.instructions[1..],
+        [
+            x(1),
+            feedback(Pauli::X, 1, 0),
+            Instruction::Gate {
+                gate: Gate::Z,
+                qubits: vec![1],
+            },
+            feedback(Pauli::Z, 1, 1),
+            feedback(Pauli::Z, 1, 2),
+        ]
+    );
+    // Sampled: the target copies the (inverted) record.
+    let c = parse("M !0\nCX rec[-1] 1\nM 1\nMPAD 1\nCX rec[-1] 2\nM 2\n").unwrap();
+    let samples = sample_stim(&c, 1000, Some(3)).unwrap();
+    for m in 0..4 {
+        assert!((0..1000).all(|s| samples.get(s, m)), "measurement {m}");
+    }
+}
+
+#[test]
+fn feedback_reads_flipped_records() {
+    // M(p) flips the record that feedback reads (Stim's semantics): the
+    // fed-back qubit agrees with the record in every shot, and records
+    // flip at rate p. Such a measurement copies its result onto the
+    // scratch qubit and flips it there, so the circuit has one qubit more;
+    // without feedback the flips stay after the run.
+    let text = "RX 2 3\nM(0.2) 0\nCX rec[-1] 1\nMX(0.1) 3\nCZ rec[-1] 2\nMPP(0.3) Z0*Z4\n\
+                CY rec[-1] 4\nM 1\nMX 2\nM 4\nDETECTOR rec[-1] rec[-4]\n";
+    let c = parse(text).unwrap();
+    assert_eq!(c.circuit.num_qubits, 6);
+    assert!(c.flips.is_empty());
+    let without = parse("M(0.2) 0\nM 0\n").unwrap();
+    assert_eq!(without.circuit.num_qubits, 1);
+    assert_eq!(without.flips, [(0, 0.2)]);
+    let shots = 200_000;
+    let samples = sample_stim(&c, shots, Some(11)).unwrap();
+    // RX 3 and MX(0.1): the record of a deterministic +1 flipped at 0.1,
+    // which CZ copies onto qubit 2's X basis.
+    // MPP(0.3) Z0*Z4: Z0 Z4 = Z0 is the first, unflipped result.
+    for (m, copy, rate) in [(0, 3, 0.2), (1, 4, 0.1), (2, 5, 0.3)] {
+        assert!((0..shots).all(|s| samples.get(s, m) == samples.get(s, copy)));
+        let ones = (0..shots).filter(|&s| samples.get(s, m)).count() as f64 / shots as f64;
+        let sigma = (rate * (1.0 - rate) / shots as f64).sqrt();
+        assert!((ones - rate).abs() <= 5.0 * sigma, "{m}: {ones}");
+    }
+    let detectors = sample_detectors(&c, shots, Some(11)).unwrap();
+    assert!((0..shots).all(|s| !detectors.detector(s, 0)));
+}
+
+#[test]
+fn feedback_round_trips_through_to_stim() {
+    use qvd::Pauli;
+    let mut c = qvd::Circuit::new(3);
+    c.h(0)
+        .measure(0, 0)
+        .feedback(Pauli::X, 1, 0)
+        .h(2)
+        .measure(2, 1);
+    c.feedback(Pauli::Y, 0, 0).feedback(Pauli::Z, 1, 1).cx(1, 2);
+    // A bit never written reads 0: no line.
+    c.feedback(Pauli::X, 2, 5);
+    c.measure(1, 2);
+    let text = stabilizer::to_stim(&c).unwrap();
+    assert!(
+        text.contains("CX rec[-1] 1\n") && text.contains("CY rec[-2] 0\n"),
+        "{text}"
+    );
+    let again = parse(&text).unwrap();
+    let mut expected = c.clone();
+    expected
+        .instructions
+        .retain(|i| !matches!(i, Instruction::Feedback { clbit: 5, .. }));
+    expected.num_clbits = 3;
+    assert_eq!(
+        again.circuit.instructions.len(),
+        expected.instructions.len()
+    );
+    let a = sample_stim(&again, 4000, Some(9)).unwrap();
+    let b = stabilizer::sample(&expected, 4000, Some(9)).unwrap();
+    assert_eq!(a.counts(), b.counts());
 }

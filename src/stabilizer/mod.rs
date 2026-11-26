@@ -24,7 +24,7 @@ use rand::{Rng, RngExt, SeedableRng};
 use rand_pcg::Pcg64;
 use rayon::prelude::*;
 
-use crate::circuit::{Circuit, Gate, Instruction, Noise};
+use crate::circuit::{Circuit, Gate, Instruction, Noise, Pauli};
 use crate::simulator::{RunResult, counts_from_keys};
 
 pub use tableau::{Layout, PauliString, Tableau};
@@ -155,6 +155,15 @@ pub fn lower(gate: &Gate, qubits: &[usize]) -> Option<Vec<Clifford>> {
     Some(out)
 }
 
+/// The Pauli as a primitive operation on `q`.
+fn pauli_op(pauli: Pauli, q: usize) -> Clifford {
+    match pauli {
+        Pauli::X => Clifford::X(q),
+        Pauli::Y => Clifford::Y(q),
+        Pauli::Z => Clifford::Z(q),
+    }
+}
+
 /// Whether every gate of `circuit` is Clifford (so the stabilizer backend
 /// can run it).
 pub fn is_clifford(circuit: &Circuit) -> bool {
@@ -174,6 +183,7 @@ impl Tableau {
     pub fn from_circuit(circuit: &Circuit, rng: &mut impl Rng) -> Result<Tableau, String> {
         let mut tableau = Tableau::new(circuit.num_qubits);
         let mut layer = Layer::new(circuit.num_qubits);
+        let mut clbits = vec![false; circuit.num_clbits];
         for instruction in &circuit.instructions {
             match instruction {
                 Instruction::Gate { gate, qubits } => {
@@ -183,13 +193,22 @@ impl Tableau {
                         layer.push(op, &mut tableau);
                     }
                 }
-                Instruction::Measure { qubit, .. } => {
+                Instruction::Measure { qubit, clbit } => {
                     layer.flush(&mut tableau);
-                    tableau.measure(*qubit, rng);
+                    clbits[*clbit] = tableau.measure(*qubit, rng);
                 }
                 Instruction::Reset { qubit } => {
                     layer.flush(&mut tableau);
                     tableau.reset(*qubit, rng);
+                }
+                &Instruction::Feedback {
+                    pauli,
+                    qubit,
+                    clbit,
+                } => {
+                    if clbits[clbit] {
+                        layer.push(pauli_op(pauli, qubit), &mut tableau);
+                    }
                 }
                 Instruction::Barrier { .. } => {}
                 Instruction::Noise { .. } => {
@@ -254,6 +273,27 @@ impl Frames {
             let (lo, hi) = table.split_at_mut(d);
             for (a, b) in hi[..words].iter_mut().zip(&lo[s..s + words]) {
                 *a ^= b;
+            }
+        }
+    }
+
+    /// `pauli` on `qubit` in the shots whose result in `record` (one bit
+    /// per shot) differs from the reference shot's, `reference`. Out of
+    /// line and cold, like the noise: inlined into the step loop, a rare
+    /// step's code slows every circuit down.
+    #[cold]
+    #[inline(never)]
+    fn feedback(&mut self, pauli: Pauli, qubit: usize, record: &[u64], reference: bool) {
+        let fill = if reference { u64::MAX } else { 0 };
+        let r = self.qubit(qubit);
+        if pauli != Pauli::Z {
+            for (x, &bits) in self.x[r.clone()].iter_mut().zip(record) {
+                *x ^= bits ^ fill;
+            }
+        }
+        if pauli != Pauli::X {
+            for (z, &bits) in self.z[r].iter_mut().zip(record) {
+                *z ^= bits ^ fill;
             }
         }
     }
@@ -567,6 +607,16 @@ enum Step {
     Reset {
         qubit: usize,
     },
+    /// `pauli` on `qubit` in the shots whose classical bit `clbit` is
+    /// set. The reference shot applied it on its own result, `reference`;
+    /// a shot whose result differs from it (its record XOR `reference` is
+    /// set) has the Pauli added to its frame.
+    Feedback {
+        pauli: Pauli,
+        qubit: usize,
+        clbit: usize,
+        reference: bool,
+    },
     /// The noise channel `noises[index]`. Kept out of line so that every
     /// step stays as small as before (the steps are walked in cache-sized
     /// segments, and doubling their size slowed noiseless circuits down).
@@ -723,6 +773,24 @@ fn sample_with_reference(
                 tableau.reset(*qubit, rng);
                 steps.push(Step::Reset { qubit: *qubit });
             }
+            &Instruction::Feedback {
+                pauli,
+                qubit,
+                clbit,
+            } => {
+                // No `pending.before`: the frames add the feedback Pauli
+                // with an XOR, which commutes with the held errors' XORs.
+                let reference = reference_bits[clbit];
+                if reference {
+                    layer.push(pauli_op(pauli, qubit), &mut tableau);
+                }
+                steps.push(Step::Feedback {
+                    pauli,
+                    qubit,
+                    clbit,
+                    reference,
+                });
+            }
             Instruction::Barrier { .. } => {}
             // The reference shot is noiseless; errors live in the frames.
             Instruction::Noise { channel, qubits } => pending.add(channel, qubits),
@@ -773,6 +841,23 @@ fn sample_with_reference(
                         let r = frames.qubit(qubit);
                         frames.x[r].fill(0);
                         frames.randomize_z(qubit);
+                    }
+                    Step::Feedback {
+                        pauli,
+                        qubit,
+                        clbit,
+                        reference,
+                    } => {
+                        // SAFETY: words `first..first + width` of the
+                        // record were written by this block alone, at an
+                        // earlier step.
+                        let record = unsafe {
+                            std::slice::from_raw_parts(
+                                out.get().add(clbit * words + *first),
+                                frames.words,
+                            )
+                        };
+                        frames.feedback(pauli, qubit, record, reference);
                     }
                     Step::Noise { index } => {
                         let step = &noises[index];
@@ -1152,8 +1237,9 @@ fn flip_records(samples: &mut Samples, circuit: &crate::stim::StimCircuit, rng: 
 /// `CZ` and `SWAP` (dropping global phases), noise channels keep their
 /// Stim names. Stim numbers measurement results in the order they happen,
 /// which are Qevedo's classical bits when each bit is written once, in
-/// increasing order (as in [`crate::library::surface_code`]). Fails on
-/// non-Clifford gates.
+/// increasing order (as in [`crate::library::surface_code`]). Feedback is
+/// written `CX rec[-k] q` (`CY`, `CZ` for Y and Z), `rec[-k]` being the
+/// latest measurement into its classical bit. Fails on non-Clifford gates.
 pub fn to_stim(circuit: &Circuit) -> Result<String, String> {
     // Consecutive instructions with the same name and arguments share a
     // line, as in Stim's own circuits; Stim applies a line's targets in
@@ -1175,6 +1261,10 @@ pub fn to_stim(circuit: &Circuit) -> Result<String, String> {
             line.push_str(&q.to_string());
         }
     };
+    // Measurements written so far, and the latest one into each classical
+    // bit, for feedback's `rec[-k]`.
+    let mut measurements = 0usize;
+    let mut latest: Vec<Option<usize>> = vec![None; circuit.num_clbits];
     for instruction in &circuit.instructions {
         match instruction {
             Instruction::Gate { gate, qubits } => {
@@ -1195,8 +1285,26 @@ pub fn to_stim(circuit: &Circuit) -> Result<String, String> {
                     emit(name.to_string(), &mut op.qubits(), true);
                 }
             }
-            Instruction::Measure { qubit, .. } => {
-                emit("M".into(), &mut std::iter::once(*qubit), true)
+            Instruction::Measure { qubit, clbit } => {
+                emit("M".into(), &mut std::iter::once(*qubit), true);
+                latest[*clbit] = Some(measurements);
+                measurements += 1;
+            }
+            &Instruction::Feedback {
+                pauli,
+                qubit,
+                clbit,
+            } => {
+                // A bit never written reads 0: no Pauli.
+                if let Some(m) = latest[clbit] {
+                    let gate = match pauli {
+                        Pauli::X => "CX",
+                        Pauli::Y => "CY",
+                        Pauli::Z => "CZ",
+                    };
+                    let head = format!("{gate} rec[-{}]", measurements - m);
+                    emit(head, &mut std::iter::once(qubit), false);
+                }
             }
             Instruction::Reset { qubit } => emit("R".into(), &mut std::iter::once(*qubit), true),
             Instruction::Barrier { .. } => {}

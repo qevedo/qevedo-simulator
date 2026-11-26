@@ -16,7 +16,7 @@ benchmarks/
 │   ├── output.csv              records and detection events into NumPy: Qevedo vs Stim
 │   ├── output_before_after.csv the same, two Qevedo builds interleaved (0.1.3 vs 0.1.4)
 │   ├── mpp*.csv                MPP toric-code memory with correlated errors: Qevedo vs Stim
-│   ├── examples_before_after*.csv the Rust examples, two builds interleaved (0.1.10 vs 0.1.11; `_recheck` 0.1.13 vs 0.1.14 on the binaries that changed, `_shots_recheck` its 40-round rerun)
+│   ├── examples_before_after*.csv the Rust examples, two builds interleaved (0.1.10 vs 0.1.11; `_recheck` 0.1.13 vs 0.1.14 on the binaries that changed, `_shots_recheck` its 40-round rerun; `_feedback` 0.1.16 vs 0.1.17 and its recheck)
 │   ├── mps.csv                 matrix product states: Qevedo vs Qiskit Aer vs quimb
 │   ├── nearclifford.csv        Clifford+T circuits: Qevedo vs Qiskit Aer
 │   ├── noisy_nearclifford*.csv noisy Clifford+T circuits: Qevedo vs Clifft, and two Qevedo builds
@@ -190,6 +190,20 @@ median); `examples_before_after_shots_recheck.csv` reruns it for 40
 rounds: 1.007 best-of, 0.996 median. (0.1.13 against 0.1.12: best-of
 0.938-1.062, medians 0.964-1.000; `examples_before_after_mps_recheck.csv`
 reran its 1.062 for 40 rounds: 1.012 best-of, 0.989 median.)
+
+`examples_before_after_feedback.csv` compares 0.1.16 with the classical
+feedback change (released as 0.1.17; a new `Instruction` variant, so every
+binary's `.text` differs), both with the version 0.1.16 and built for
+x86-64-v3, 9 rounds: best-of 0.895-1.169, medians 0.938-1.083. That run
+had the feedback step inlined into the stabilizer frame loop; the shipped
+build keeps it out of line (`#[cold]`), and
+`examples_before_after_feedback_recheck.csv` times that build on every
+case whose median read above 1.03 (30 rounds: `mps` random 0.993, `mps`
+QFT 1.043, then 0.973 over 120 rounds, against an A/A run of the old build
+at 0.994-0.995; 10,000-shot `nearclifford` 0.984, stabilizer d = 21 1.000
+with and without noise) and on the other stabilizer and Stim cases (15
+rounds: medians 0.986-1.015). The 63 ms QFT case is printed to the
+millisecond, so one tick is 1.6%.
 
 ## Noisy near-Clifford, before and after
 

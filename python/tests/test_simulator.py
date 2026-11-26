@@ -546,6 +546,114 @@ OBSERVABLE_INCLUDE(0) rec[-1]
         assert (ours > 0).all()
 
 
+def test_feedback_matches_stim_on_random_circuits():
+    stim = pytest.importorskip("stim")
+    np = pytest.importorskip("numpy")
+    # Classically controlled Paulis (CX/CY/CZ rec[-k] q, CZ and XCZ/YCZ
+    # with the record second, sweep bits), after measurements in every
+    # basis, inverted ones and MPAD: the same affine space and rates.
+    rng = random.Random(17)
+    controlled = {"CX": 0, "CY": 0, "ZCX": 0, "CNOT": 0, "ZCY": 0, "CZ": 2, "ZCZ": 2,
+                  "XCZ": 1, "YCZ": 1}
+    for trial in range(200):
+        n = rng.randint(1, 5)
+        lines, measured = [], 0
+        for _ in range(rng.randint(4, 16)):
+            r = rng.random()
+            if r < 0.3:
+                lines.append(f"{rng.choice(['H', 'S', 'SQRT_X', 'C_XYZ'])} {rng.randrange(n)}")
+            elif r < 0.45 and n > 1:
+                a, b = rng.sample(range(n), 2)
+                lines.append(f"{rng.choice(['CX', 'CZ', 'ISWAP', 'XCY'])} {a} {b}")
+            elif r < 0.65:
+                bang = "!" if rng.random() < 0.3 else ""
+                name = rng.choice(["M", "MX", "MY", "MR", "MPAD"])
+                lines.append(f"MPAD {rng.randrange(2)}" if name == "MPAD"
+                             else f"{name} {bang}{rng.randrange(n)}")
+                measured += 1
+            elif measured:
+                name = rng.choice(list(controlled))
+                side = controlled[name] if controlled[name] < 2 else rng.randrange(2)
+                rec = f"rec[-{rng.randint(1, min(measured, 3))}]"
+                if rng.random() < 0.1:
+                    rec = "sweep[0]"
+                q = str(rng.randrange(n))
+                lines.append(f"{name} {rec} {q}" if side == 0 else f"{name} {q} {rec}")
+        lines.append("M " + " ".join(map(str, range(n))))
+        text = "\n".join(lines) + "\n"
+        shots = 4000
+        theirs = stim.Circuit(text).compile_sampler(seed=trial).sample(shots)
+        ours = sample(text, shots, seed=trial).T
+        offset_t, span_t = _affine_span(theirs)
+        offset_o, span_o = _affine_span(ours)
+        assert len(span_t) == len(span_o), text
+        assert all(_reduce(v, span_t) == 0 for v in span_o.values()), text
+        assert _reduce(offset_t ^ offset_o, span_t) == 0, text
+        assert np.abs(theirs.mean(axis=0) - ours.mean(axis=0)).max() < 0.05, text
+
+
+def test_feedback_reads_flipped_records_as_stim():
+    stim = pytest.importorskip("stim")
+    np = pytest.importorskip("numpy")
+    # A repetition code whose ancillas are measured with M(p) and then
+    # reset by feedback (CX rec[-1] a) instead of MR: a flipped record
+    # leaves the ancilla wrong for the next round, as in Stim, so the
+    # detectors compare each round with the one before it.
+    text = """\
+R 0 1 2 3 4
+REPEAT 5 {
+    X_ERROR(0.03) 0 2 4
+    CX 0 1 2 3
+    CX 2 1 4 3
+    M(0.05) 1 3
+    CX rec[-2] 1 rec[-1] 3
+    DETECTOR rec[-2] rec[-4]
+    DETECTOR rec[-1] rec[-3]
+}
+M 0 2 4
+DETECTOR rec[-3] rec[-2] rec[-5]
+DETECTOR rec[-2] rec[-1] rec[-4]
+OBSERVABLE_INCLUDE(0) rec[-3]
+"""
+    text = "MPAD 0 0\n" + text
+    shots = 200_000
+    ours_d, ours_o = sample_detectors(text, shots, seed=6)
+    sampler = stim.Circuit(text).compile_detector_sampler(seed=6)
+    theirs_d, theirs_o = sampler.sample(shots, separate_observables=True)
+    for ours, theirs in [(ours_d.mean(0), theirs_d.mean(0)), (ours_o.mean(0), theirs_o.mean(0))]:
+        pooled = (ours + theirs) / 2
+        sigma = np.sqrt(np.maximum(pooled * (1 - pooled), 1e-9) * 2 / shots)
+        assert (np.abs(ours - theirs) < 5 * sigma).all()
+        assert (ours > 0).all()
+    # Pairs of detectors in the same round are correlated through the
+    # shared data qubit: compare their joint rates too.
+    joint_o = (ours_d[:, 0::2] & ours_d[:, 1::2]).mean(0)
+    joint_t = (theirs_d[:, 0::2] & theirs_d[:, 1::2]).mean(0)
+    sigma = np.sqrt(np.maximum(joint_t * (1 - joint_t), 1e-9) * 2 / shots)
+    assert (np.abs(joint_o - joint_t) < 5 * sigma).all()
+
+
+def test_circuit_feedback():
+    # Teleport |1> from qubit 0 to qubit 2: X from the Bell measurement's
+    # Z result, Z from its X result. Qubit 2 then reads 1 in every shot.
+    c = Circuit(3)
+    c.x(0).h(1).cx(1, 2).cx(0, 1).h(0)
+    c.measure(0, 0).measure(1, 1)
+    c.feedback("X", 2, 1).feedback("z", 2, 0)
+    c.measure(2, 2)
+    assert c.instructions()[7:9] == [("feedback_x", [2], [1.0]), ("feedback_z", [2], [0.0])]
+    for backend in ("stabilizer", "statevector"):
+        counts = run(c, 2000, seed=3, backend=backend).counts
+        assert len(counts) == 4 and all(k[0] == "1" for k in counts), (backend, counts)
+    text = c.to_stim()
+    assert "CX rec[-1] 2\nCZ rec[-2] 2\n" in text
+    assert from_stim(text)[0].instructions()[7:9] == c.instructions()[7:9]
+    with pytest.raises(ValueError):
+        c.feedback("H", 2, 0)
+    with pytest.raises(Exception, match="classical feedback"):
+        run(c, 10, backend="mps")
+
+
 REPETITION = """\
 R 0 1 2 3 4
 REPEAT 4 {
@@ -584,7 +692,7 @@ def test_from_stim_and_detector_shapes():
     dets, obs = sample_detectors(quiet, 500, seed=2)
     assert not dets.any() and not obs.any()
     with pytest.raises(ValueError, match="not supported"):
-        sample_detectors("M 0\nCX rec[-1] 1\n", 10)
+        sample_detectors("M 0\nCX 1 rec[-1]\n", 10)
 
 
 def test_bit_packed_outputs_match_the_bool_outputs():

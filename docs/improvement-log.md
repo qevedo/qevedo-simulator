@@ -7,6 +7,92 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-26 — Classical feedback: `CX rec[-1] q` in the stabilizer sampler and the Stim reader (0.1.17)
+
+**What.**
+- `Instruction::Feedback { pauli, qubit, clbit }` (`circuit.rs`, with a
+  small `Pauli` enum and `Circuit::feedback`): the Pauli on `qubit` when
+  classical bit `clbit` reads 1 at that point. Python:
+  `Circuit.feedback("X", qubit, clbit)`; `instructions()` lists it as
+  `feedback_x` / `feedback_y` / `feedback_z`.
+- Stabilizer sampler (`stabilizer/mod.rs`): the reference shot applies
+  the Pauli on its own result; a new `Step::Feedback` XORs each shot's
+  flip bits (its record XOR the reference's, already written to the
+  record) into the frame's X words (Z for Z, both for Y). No random draws
+  are added, so circuits without feedback draw exactly as before.
+  `Tableau::from_circuit` tracks its results and applies feedback too.
+- State vector: the shot-by-shot path applies the Pauli when the bit is
+  set. MPS and near-Clifford reject feedback with a clear error
+  (`is_supported` is false, so `Auto` sends a non-Clifford circuit with
+  feedback to the state vector).
+- Stim reader (`stim.rs`): `CX`/`CNOT`/`ZCX`, `CY`/`ZCY` with the record
+  first, `CZ`/`ZCZ` with it on either side, `XCZ`/`YCZ` with it second;
+  mixed lines (`CX rec[-1] 2 0 1`) keep their qubit pairs as gates; `CZ`
+  between two records does nothing; a record as the Pauli's target is an
+  error, as in Stim ("record editing"). Inverted records (`M !q`,
+  `MPAD 1`) become the Pauli unconditionally plus the feedback. Flipped
+  records (`M(p)`, `MPP(p)`, `MX(p)`...) in a circuit with feedback copy Z
+  of the measured qubit onto a scratch qubit (`CX q s`, `X_ERROR(p) s`,
+  `M s`, `R s`, sharing the herald's extra qubit), because Stim's feedback
+  reads the flipped record (checked: `M(0.2) 0; CX rec[-1] 1; M 1` gives
+  equal results in every Stim shot) while the reader's flips are otherwise
+  applied after the run. Circuits without feedback are built as before.
+  Sweep bits (`sweep[k]`) parse and read 0, as in Stim's samplers given no
+  sweep data.
+- `to_stim` writes feedback as `CX rec[-k] q` (`CY`, `CZ`).
+
+**Why.** Next item 8, and the last instructions of Stim's format the
+reader rejected. Teleportation, measurement-based resets
+(`M; CX rec[-1] q`), lattice-surgery byproduct corrections and
+cultivation-style circuits use feedback; such files failed to load at
+all. The near-Clifford samplers we compare against, Clifft
+(arXiv:2604.27058) and SymFT (arXiv:2607.28600), both take
+measurement-controlled Paulis. The change is exact, adds no random draws
+to existing circuits, and can be proved against Stim and exact
+distributions today.
+
+**Measured.**
+- Rust: `feedback_sampling_matches_exact_distribution` (48 random circuits,
+  1-4 qubits, mid-circuit measurements into bits written twice or never,
+  resets, 5-10 feedback Paulis each, noise on a third): stabilizer (50,000
+  shots) and state vector (5,000) within 5σ of the distribution summed
+  exactly over every outcome and error; teleportation of the six Pauli
+  eigenstates is exact on both backends and in `Tableau::from_circuit`;
+  the reader's tests pin every gate's side and Pauli, inversions, `MPAD`,
+  sweep bits and the errors; flipped records fed back agree with the
+  target in all 200,000 shots at rates 0.2 / 0.1 / 0.3 within 5σ; a
+  round trip through `to_stim` samples the same counts for a seed.
+  Mutations (no frame XOR; inversions ignored; flips after the run) each
+  fail a test.
+- Python against Stim: `test_feedback_matches_stim_on_random_circuits`
+  (200 circuits, same affine outcome space and rates) and a repetition
+  code reset by feedback after `M(0.05)` (detector, observable and joint
+  rates at Stim's within 5σ, 200,000 shots). A one-off script: 600 random
+  circuits with 1001 controlled lines, flips, inversions, `MPAD`, `MPP`,
+  sweep bits and noise: 0 differences (outcome sets and rates for the
+  noiseless half; rates, every pair's XOR and detector rates for the
+  noisy half, 20,000 shots each).
+- Speed (4-vCPU VM, x86-64-v3, both at version 0.1.16): every example
+  binary's `.text` changed (the new `Instruction` variant), so all 17
+  cases of `compare_examples.py` ran, 9 rounds: medians 0.938-1.083,
+  best-of 0.895-1.169 (`examples_before_after_feedback.csv`). With the
+  feedback step moved out of line, the cases above 1.03 at 30 rounds: MPS
+  random 0.993, MPS QFT 1.043 (then 0.973 over 120 rounds; A/A of the old
+  build 0.994-0.995), near-Clifford 10,000 shots 0.984, stabilizer d = 21
+  1.000 with and without noise; other stabilizer and Stim cases at 15
+  rounds 0.986-1.015 (`examples_before_after_feedback_recheck.csv`).
+  Feedback itself costs one pass over the target's frame words per line.
+
+**Learned.** Probe Stim for each line's meaning before coding it: which
+sides may be classical, that `CZ rec rec` is nothing, that feedback reads
+the flipped record. A new enum variant changes every binary, so the full
+timing pass is needed; recheck only the cases above 1.03, with an A/A run
+for millisecond cases.
+
+**Next.** `if_test` with Pauli bodies from Qiskit and `if (c[k]) x q;`
+in the QASM 3 reader, both onto `Instruction::Feedback`; sweep data; then
+the near-Clifford frames' row gathers.
+
 ## 2026-11-24 — The rest of Stim's instruction set in the reader (0.1.16)
 
 **What.** `stim.rs` now reads every instruction of Stim 1.16 except

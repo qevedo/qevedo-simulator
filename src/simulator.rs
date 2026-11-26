@@ -322,6 +322,10 @@ pub fn choose_backend<T: Real>(circuit: &Circuit, options: &Options) -> Backend 
     }
 }
 
+/// The error for classical feedback on a backend that cannot run it.
+pub(crate) const FEEDBACK_BACKENDS: &str =
+    "classical feedback runs on the stabilizer and state-vector backends only";
+
 fn run_on<T: Real>(
     backend: Backend,
     circuit: &Circuit,
@@ -336,6 +340,9 @@ fn run_on<T: Real>(
         Backend::NearClifford => {
             return crate::nearclifford::run(circuit, shots, options.seed)
                 .map_err(std::io::Error::other);
+        }
+        Backend::Mps if circuit.has_feedback() => {
+            return Err(std::io::Error::other(FEEDBACK_BACKENDS));
         }
         _ if circuit.has_noise() => {
             return Err(std::io::Error::other(format!(
@@ -400,6 +407,15 @@ fn run_on<T: Real>(
                         &mut result.stats,
                     );
                     state.reset(*qubit, &mut rng);
+                }
+                &Instruction::Feedback {
+                    pauli,
+                    qubit,
+                    clbit,
+                } => {
+                    if clbits[clbit] {
+                        pending.push(gate_op(&pauli.gate(), &[qubit]));
+                    }
                 }
                 Instruction::Noise { .. } => unreachable!("rejected by run_on"),
             }

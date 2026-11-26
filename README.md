@@ -295,20 +295,31 @@ the reference state vector, `PAULI_CHANNEL_2`'s order against Stim's,
 and correlated chains and both channels against distributions summed
 exactly over every error.
 
-The reader takes every instruction of Stim 1.16 except classically
-controlled gates (`CX rec[-1] 0`) and sweep bits: all of Stim's Clifford
+The reader takes every instruction of Stim 1.16: all of Stim's Clifford
 gates (`ISWAP`, `SQRT_XX`, `XCY`, `CXSWAP`, `C_NXYZ`, ...), two-qubit
 parity measurements (`MXX`, `MYY`, `MZZ`), `SPP`/`SPP_DAG`, heralded
 errors (`HERALDED_ERASE`, `HERALDED_PAULI_CHANNEL_1`, run on one extra
-qubit that records the herald) and tags (`X_ERROR[leak](0.1) 0`). In the
+qubit that records the herald), tags (`X_ERROR[leak](0.1) 0`) and
+classical feedback (`CX rec[-1] 5`, `CY`, `CZ`, `XCZ`, `YCZ`; sweep bits
+read 0, as in Stim's samplers given no sweep data). Feedback reads the
+record as Stim does, flips and inversions included. In the
 Python tests, 300 random circuits of all of these give the same outcome
 spaces and rates as Stim, and a repetition code on erasure qubits with
 heralds and `MZZ(p)` fires every detector at Stim's rate; the Rust tests
 pin each gate's Pauli table to Stim's and `SPP` to its matrix.
 
-What is not there yet: classically controlled gates and sweep bits in the
-reader (each is an error naming the line, never skipped), writing
-detectors in `to_stim`, and noise on the state-vector and MPS backends.
+Feedback is an instruction of its own (`Circuit.feedback("X", qubit,
+clbit)` in Python): the stabilizer backend runs it in the reference shot
+on that shot's result and in each shot's Pauli frame on the shots whose
+result differs; the state vector runs it shot by shot. The Rust tests
+check both against distributions summed exactly over every outcome and
+error; 600 random circuits with feedback, flipped and inverted records,
+`MPAD`, `MPP` and noise give the same outcome spaces, rates, pair
+correlations and detector rates as Stim.
+
+What is not there yet: sweep data (sweep bits always read 0), feedback on
+the MPS and near-Clifford backends, writing detectors in `to_stim`, and
+noise on the state-vector and MPS backends.
 
 ### Low-entanglement circuits (MPS)
 

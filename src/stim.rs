@@ -10,8 +10,7 @@
 //! [`crate::stabilizer::sample_detectors`] then samples detection events
 //! and observable flips, the input of decoders such as PyMatching.
 //!
-//! What is read (every instruction of Stim 1.16 but classical control and
-//! sweep bits):
+//! What is read (every instruction of Stim 1.16):
 //! - **Gates:** `I`, `X`, `Y`, `Z`, `H` (`H_XZ`), `S` (`SQRT_Z`), `S_DAG`
 //!   (`SQRT_Z_DAG`), `SQRT_X`, `SQRT_X_DAG`, `SQRT_Y`, `SQRT_Y_DAG`,
 //!   `H_XY`, `H_YZ`, `H_NXY`, `H_NXZ`, `H_NYZ`, `C_XYZ`, `C_ZYX` and the
@@ -50,15 +49,20 @@
 //!   (coordinates do not change what is sampled), as are tags
 //!   (`X_ERROR[leak](0.1) 0`).
 //! - **Blocks:** `REPEAT n { ... }`, nested, unrolled.
+//! - **Classical control:** `CX rec[-1] 5`, `CY`, `CZ` (and their `Z`
+//!   aliases) with the record first, `CZ` and `XCZ`/`YCZ` with it second,
+//!   each an [`Instruction::Feedback`] reading the record as Stim does,
+//!   flips and inversions included (see `Builder::controlled`). Sweep
+//!   bits (`sweep[k]`) read 0, as in Stim's samplers given no sweep data.
 //!
-//! Everything else (classically controlled gates such as `CX rec[-1] 0`,
-//! sweep bits, ...) is rejected with the line it is on, rather than
+//! Everything else (a record as the target, `rec[-k]` on other gates,
+//! unknown instructions) is rejected with the line it is on, rather than
 //! skipped: skipping an instruction would silently sample a different
 //! circuit.
 
 use std::f64::consts::FRAC_PI_2;
 
-use crate::circuit::{Circuit, Gate, Instruction, Noise};
+use crate::circuit::{Circuit, Gate, Instruction, Noise, Pauli};
 
 /// A circuit read from Stim's format.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -94,6 +98,8 @@ enum Target {
     Inverted(usize),
     /// `rec[-k]`: the `k`-th most recent measurement result.
     Record(usize),
+    /// `sweep[k]`: bit `k` of a shot's sweep configuration.
+    Sweep(usize),
     /// A Pauli on a qubit, as in `E(p) X0 Z1` and `MPP X0*Y1`: the letter
     /// (`b'X'`, `b'Y'` or `b'Z'`), the qubit, whether it was written `!X0`
     /// (an inverted result), and whether `*` joins it to the next target
@@ -170,16 +176,19 @@ pub fn parse(text: &str) -> Result<StimCircuit, String> {
     let mut max_qubit = None;
     let items = parse_block(&lines, &mut next, &mut max_qubit, None)?;
     let qubits = max_qubit.map_or(0, |q| q + 1);
-    // Heralded errors record their herald on one extra qubit past Stim's.
-    let herald = heralded(&items).then_some(qubits);
+    // Heralded errors record their herald on one extra qubit past Stim's;
+    // so does a noisy measurement whose record feedback may read.
+    let copy_flips = feedback(&items) && noisy_measurement(&items);
+    let scratch = (heralded(&items) || copy_flips).then_some(qubits);
     let mut builder = Builder {
         out: StimCircuit {
-            circuit: Circuit::new(qubits + usize::from(herald.is_some())),
+            circuit: Circuit::new(qubits + usize::from(scratch.is_some())),
             ..StimCircuit::default()
         },
         measurements: 0,
         chain: None,
-        herald,
+        scratch,
+        copy_flips,
     };
     builder.run(&items)?;
     builder.out.circuit.num_clbits = builder.measurements;
@@ -191,6 +200,29 @@ fn heralded(items: &[Item]) -> bool {
     items.iter().any(|item| match item {
         Item::Op { name, .. } => name.starts_with("HERALDED_"),
         Item::Repeat { body, .. } => heralded(body),
+    })
+}
+
+/// Whether any gate, in any block, is classically controlled (has a
+/// `rec[-k]` target; the annotations' records are not control).
+fn feedback(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Op { name, targets, .. } => {
+            !matches!(name.as_str(), "DETECTOR" | "OBSERVABLE_INCLUDE")
+                && targets.iter().any(|t| matches!(t, Target::Record(_)))
+        }
+        Item::Repeat { body, .. } => feedback(body),
+    })
+}
+
+/// Whether any measurement, in any block, flips its result with a
+/// probability (`M(p)`, `MPP(p)`, ...).
+fn noisy_measurement(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Op { name, args, .. } => {
+            name.starts_with('M') && name != "MPAD" && args.first().is_some_and(|&p| p > 0.0)
+        }
+        Item::Repeat { body, .. } => noisy_measurement(body),
     })
 }
 
@@ -354,14 +386,23 @@ fn parse_target(word: &str) -> Result<Target, String> {
             _ => Err(format!("bad measurement record target '{word}'")),
         };
     }
+    if let Some(k) = word
+        .strip_prefix("sweep[")
+        .and_then(|w| w.strip_suffix(']'))
+    {
+        return k
+            .parse::<usize>()
+            .map(Target::Sweep)
+            .map_err(|_| format!("bad sweep bit target '{word}'"));
+    }
     if let Some(q) = word.strip_prefix('!') {
         if let Ok(q) = q.parse() {
             return Ok(Target::Inverted(q));
         }
     }
-    word.parse()
-        .map(Target::Qubit)
-        .map_err(|_| format!("target '{word}' is not supported (qubits, !qubits and rec[-k] are)"))
+    word.parse().map(Target::Qubit).map_err(|_| {
+        format!("target '{word}' is not supported (qubits, !qubits, rec[-k] and sweep[k] are)")
+    })
 }
 
 /// One gate of a Stim gate's decomposition, on the qubits of one target
@@ -531,12 +572,72 @@ struct Builder {
     /// [`Noise::Correlated`] instruction, which a following
     /// `ELSE_CORRELATED_ERROR` extends.
     chain: Option<usize>,
-    /// The extra qubit that records heralds, if the circuit has heralded
-    /// errors.
-    herald: Option<usize>,
+    /// One extra qubit past Stim's, in `|0>` between uses: it records
+    /// heralds (see [`Self::heralded`]) and the noisy measurements of a
+    /// circuit with feedback (see [`Self::measure_into`]).
+    scratch: Option<usize>,
+    /// Whether noisy measurements copy their result onto the scratch
+    /// qubit and flip it there, instead of listing the flip in
+    /// [`StimCircuit::flips`]: feedback reads the flipped record, so the
+    /// flip must happen in the shot, not after the run.
+    copy_flips: bool,
+}
+
+/// Apply a gate's decomposition (see [`gate_sequence`]) to one target or
+/// one pair of targets.
+fn apply_sequence(circuit: &mut Circuit, gates: &[Step], chunk: &[usize]) {
+    for (gate, at) in gates {
+        if gate.arity() == at.len() {
+            // On the stack: this runs for every target pair of every
+            // unrolled line.
+            let mut on = [0usize; 2];
+            for (o, &i) in on.iter_mut().zip(at.iter()) {
+                *o = chunk[i];
+            }
+            circuit.gate(gate.clone(), &on[..at.len()]);
+        } else {
+            // A one-qubit gate on each listed qubit.
+            for &i in at.iter() {
+                circuit.gate(gate.clone(), &[chunk[i]]);
+            }
+        }
+    }
+}
+
+/// Measure Z of `q` into classical bit `m`, or, with `copy` = `Some(s)`,
+/// copy Z of `q` onto the scratch qubit `s` (in `|0>`), flip the copy with
+/// probability `flip`, measure `s` into `m` and reset it.
+///
+/// With `s` in `|0>`, CX q→s maps `a|0>|0> + b|1>|0>` to
+/// `a|0>|0> + b|1>|1>`, so measuring `s` collapses `q` as measuring `q`
+/// would; an X error on `s` before its measurement flips only the record.
+/// The flipped record is then part of the shot, where feedback can read
+/// it, as Stim's does.
+fn measure_z(circuit: &mut Circuit, q: usize, m: usize, copy: Option<usize>, flip: f64) {
+    match copy {
+        Some(s) => {
+            circuit.cx(q, s);
+            circuit.x_error(s, flip);
+            circuit.measure(s, m);
+            circuit.reset(s);
+        }
+        None => {
+            circuit.measure(q, m);
+        }
+    }
 }
 
 impl Builder {
+    /// The scratch qubit a measurement with flip probability `flip` copies
+    /// its result onto (see [`measure_z`]), if it does.
+    fn copy_onto(&self, flip: f64) -> Option<usize> {
+        if flip > 0.0 && self.copy_flips {
+            Some(self.scratch.expect("parse adds the scratch qubit"))
+        } else {
+            None
+        }
+    }
+
     fn run(&mut self, items: &[Item]) -> Result<(), String> {
         for item in items {
             match item {
@@ -582,8 +683,9 @@ impl Builder {
                 Target::Qubit(q) => Ok(q),
                 Target::Inverted(q) if invertible => Ok(q),
                 Target::Inverted(_) => Err(format!("{name} takes no inverted targets")),
-                Target::Record(_) => Err(format!(
-                    "{name} with measurement record targets (classical control) is not supported"
+                Target::Record(_) | Target::Sweep(_) => Err(format!(
+                    "{name} takes no measurement record or sweep bit targets \
+                     (classical control is CX, CY, CZ, XCZ and YCZ)"
                 )),
                 Target::Pauli { .. } => Err(format!("{name} takes qubit targets, not Paulis")),
             })
@@ -629,6 +731,12 @@ impl Builder {
         let circuit = &mut self.out.circuit;
         if let Some((arity, gates)) = gate_sequence(name) {
             Self::no_args(name, args)?;
+            if targets
+                .iter()
+                .any(|t| matches!(t, Target::Record(_) | Target::Sweep(_)))
+            {
+                return self.controlled(name, gates, targets);
+            }
             let qubits = Self::qubits(name, targets, false)?;
             if !qubits.len().is_multiple_of(arity) {
                 return Err(format!("{name} needs pairs of targets"));
@@ -637,22 +745,7 @@ impl Builder {
                 if arity == 2 && chunk[0] == chunk[1] {
                     return Err(format!("{name} on qubit {} twice", chunk[0]));
                 }
-                for (gate, at) in gates {
-                    if gate.arity() == at.len() {
-                        // On the stack: this runs for every target pair of
-                        // every unrolled line.
-                        let mut on = [0usize; 2];
-                        for (o, &i) in on.iter_mut().zip(at.iter()) {
-                            *o = chunk[i];
-                        }
-                        circuit.gate(gate.clone(), &on[..at.len()]);
-                    } else {
-                        // A one-qubit gate on each listed qubit.
-                        for &i in at.iter() {
-                            circuit.gate(gate.clone(), &[chunk[i]]);
-                        }
-                    }
-                }
+                apply_sequence(circuit, gates, chunk);
             }
             return Ok(());
         }
@@ -670,15 +763,17 @@ impl Builder {
                     let (q, inverted) = match *target {
                         Target::Qubit(q) => (q, false),
                         Target::Inverted(q) => (q, true),
-                        Target::Record(_) | Target::Pauli { .. } => {
+                        Target::Record(_) | Target::Sweep(_) | Target::Pauli { .. } => {
                             return Err(format!("{name} takes qubit targets"));
                         }
                     };
+                    let m = self.measurements;
+                    let copy = self.copy_onto(flip);
+                    let circuit = &mut self.out.circuit;
                     for gate in to_z {
                         circuit.gate(gate.clone(), &[q]);
                     }
-                    let m = self.measurements;
-                    circuit.measure(q, m);
+                    measure_z(circuit, q, m, copy, flip);
                     self.measurements += 1;
                     if reset {
                         circuit.reset(q);
@@ -686,7 +781,7 @@ impl Builder {
                     for gate in back {
                         circuit.gate(gate.clone(), &[q]);
                     }
-                    if flip > 0.0 {
+                    if flip > 0.0 && copy.is_none() {
                         self.out.flips.push((m, flip));
                     }
                     if inverted {
@@ -856,6 +951,84 @@ impl Builder {
                 observables[index].extend(records);
             }
             _ => return Err(format!("Stim instruction {name} is not supported")),
+        }
+        Ok(())
+    }
+
+    /// A controlled gate with classical controls among its pairs of
+    /// targets, as in `CX rec[-1] 5` or `CZ 2 sweep[0]`.
+    ///
+    /// A classical control applies the Pauli the gate would put on the
+    /// other qubit when the control is 1: `CX`, `CY`, `CZ` (and `ZCX`,
+    /// `ZCY`, `ZCZ`, `CNOT`) take it first, putting X, Y or Z on the
+    /// second; `XCZ` and `YCZ` take it second, putting X or Y on the first;
+    /// `CZ` takes it on either side, and two classical bits do nothing.
+    /// A classical target would edit the record, which Stim rejects too,
+    /// as it rejects classical bits on every other gate.
+    ///
+    /// `rec[-k]` reads the record as Stim's does, inversions and flips
+    /// included: an inverted record (`M !q`, `MPAD 1`) is the Pauli always
+    /// times the Pauli when the measured result is 1; flips happen in the
+    /// shot (see [`measure_z`]). Sweep bits read 0, as in Stim's samplers
+    /// when they are given no sweep data, so they apply nothing.
+    fn controlled(&mut self, name: &str, gates: &[Step], targets: &[Target]) -> Result<(), String> {
+        let (pauli, sides) = match name {
+            "CX" | "CNOT" | "ZCX" => (Pauli::X, [true, false]),
+            "CY" | "ZCY" => (Pauli::Y, [true, false]),
+            "CZ" | "ZCZ" => (Pauli::Z, [true, true]),
+            "XCZ" => (Pauli::X, [false, true]),
+            "YCZ" => (Pauli::Y, [false, true]),
+            _ => {
+                return Err(format!(
+                    "{name} takes no measurement record or sweep bit targets \
+                     (classical control is CX, CY, CZ, XCZ and YCZ)"
+                ));
+            }
+        };
+        if !targets.len().is_multiple_of(2) {
+            return Err(format!("{name} needs pairs of targets"));
+        }
+        for pair in targets.chunks(2) {
+            let classical = |t: &Target| matches!(t, Target::Record(_) | Target::Sweep(_));
+            let (control, target) = match (classical(&pair[0]), classical(&pair[1])) {
+                (false, false) => {
+                    let qubits = Self::qubits(name, pair, false)?;
+                    if qubits[0] == qubits[1] {
+                        return Err(format!("{name} on qubit {} twice", qubits[0]));
+                    }
+                    apply_sequence(&mut self.out.circuit, gates, &qubits);
+                    continue;
+                }
+                (true, true) if sides == [true, true] => {
+                    // Validate the records; a CZ between bits is nothing.
+                    self.records(
+                        name,
+                        &pair
+                            .iter()
+                            .filter(|t| matches!(t, Target::Record(_)))
+                            .copied()
+                            .collect::<Vec<_>>(),
+                    )?;
+                    continue;
+                }
+                (true, false) if sides[0] => (pair[0], pair[1]),
+                (false, true) if sides[1] => (pair[1], pair[0]),
+                _ => {
+                    return Err(format!(
+                        "{name} with a classical target would edit the measurement record, \
+                         which is not supported"
+                    ));
+                }
+            };
+            let q = Self::qubits(name, &[target], false)?[0];
+            if let Target::Record(_) = control {
+                let m = self.records(name, &[control])?[0];
+                let circuit = &mut self.out.circuit;
+                if self.out.inverted.binary_search(&m).is_ok() {
+                    circuit.gate(pauli.gate(), &[q]);
+                }
+                circuit.feedback(pauli, q, m);
+            }
         }
         Ok(())
     }
@@ -1032,11 +1205,12 @@ impl Builder {
     /// applies after an `MPP`.
     fn measure_product(&mut self, factors: &[(u8, usize)], inverted: bool, flip: f64) {
         let m = self.measurements;
+        let copy = self.copy_onto(flip);
         self.on_product(factors, |circuit, last| {
-            circuit.measure(last, m);
+            measure_z(circuit, last, m, copy, flip);
         });
         self.measurements += 1;
-        if flip > 0.0 {
+        if flip > 0.0 && copy.is_none() {
             self.out.flips.push((m, flip));
         }
         if inverted {
@@ -1063,7 +1237,7 @@ impl Builder {
             Self::probability(name, args, 4)?;
             [args[0], args[1], args[2], args[3]]
         };
-        let herald = self.herald.expect("parse adds the herald qubit");
+        let herald = self.scratch.expect("parse adds the scratch qubit");
         for q in Self::qubits(name, targets, false)? {
             let circuit = &mut self.out.circuit;
             let products: Vec<(f64, String)> = probabilities

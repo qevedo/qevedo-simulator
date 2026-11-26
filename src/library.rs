@@ -295,7 +295,7 @@ pub fn with_depolarizing_noise(circuit: &Circuit, p: f64) -> Circuit {
         }
         let touched: Vec<usize> = match instruction {
             Instruction::Gate { qubits, .. } | Instruction::Barrier { qubits } => qubits.clone(),
-            Instruction::Reset { qubit } => vec![*qubit],
+            Instruction::Reset { qubit } | Instruction::Feedback { qubit, .. } => vec![*qubit],
             Instruction::Noise { qubits, .. } => qubits.clone(),
             Instruction::Measure { .. } => unreachable!(),
         };

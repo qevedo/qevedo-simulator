@@ -163,6 +163,16 @@ pub fn exact_distribution(circuit: &Circuit) -> std::collections::BTreeMap<Strin
                     continue;
                 }
                 Instruction::Barrier { .. } => continue,
+                &Instruction::Feedback {
+                    pauli,
+                    qubit,
+                    clbit,
+                } => {
+                    if clbits[clbit] {
+                        reference::apply(&mut state, &pauli.gate().matrix(), &[qubit]);
+                    }
+                    continue;
+                }
                 Instruction::Noise { channel, qubits } => {
                     // One target per instruction (split below).
                     for (p, errors) in noise_branches(channel.clone(), qubits) {

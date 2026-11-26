@@ -658,3 +658,173 @@ fn stim_export() {
          X_ERROR(0.001) 0 2 3\nM 2 3\n"
     );
 }
+
+/// A random Clifford circuit with mid-circuit measurements into a few
+/// classical bits (some written twice, one never), resets, Paulis fed
+/// back from those bits, and, with `noisy`, noise channels; every qubit
+/// measured at the end into bits of its own.
+fn random_feedback_circuit(rng: &mut impl Rng, n: usize, noisy: bool) -> Circuit {
+    use qvd::Pauli;
+    let mid = 3;
+    let mut circuit = Circuit::new(n);
+    for _ in 0..5 {
+        let part = random_clifford(rng, n, 5);
+        circuit.instructions.extend(part.instructions);
+        match rng.random_range(0..4) {
+            0 => {
+                circuit.reset(rng.random_range(0..n));
+            }
+            _ => {
+                // Bit `mid - 1` is never written: it reads 0.
+                circuit.measure(rng.random_range(0..n), rng.random_range(0..mid - 1));
+            }
+        }
+        if noisy && rng.random_bool(0.5) {
+            let (channel, qubits) = common::random_noise(rng, n);
+            circuit.noise(channel, &qubits);
+        }
+        for _ in 0..rng.random_range(1..=2) {
+            let pauli = [Pauli::X, Pauli::Y, Pauli::Z][rng.random_range(0..3)];
+            circuit.feedback(pauli, rng.random_range(0..n), rng.random_range(0..mid));
+        }
+    }
+    let part = random_clifford(rng, n, 5);
+    circuit.instructions.extend(part.instructions);
+    for q in 0..n {
+        circuit.measure(q, mid + q);
+    }
+    circuit
+}
+
+#[test]
+fn feedback_sampling_matches_exact_distribution() {
+    // Classical feedback on the stabilizer backend (the reference shot
+    // applies the Pauli on its own results, the frames on the shots whose
+    // result differs) and, shot by shot, on the state vector, against the
+    // exact distribution, which branches on every measurement and error.
+    let mut rng = common::rng(41);
+    for case in 0..48 {
+        let n = 1 + case % 4;
+        let noisy = case % 3 == 2;
+        let circuit = random_feedback_circuit(&mut rng, n, noisy);
+        assert!(circuit.has_feedback());
+        let exact = exact_distribution(&circuit);
+        let backends: &[Backend] = if noisy {
+            &[Backend::Stabilizer]
+        } else {
+            &[Backend::Stabilizer, Backend::StateVector]
+        };
+        for &backend in backends {
+            let shots = if backend == Backend::Stabilizer {
+                50_000
+            } else {
+                5_000
+            };
+            let options = Options {
+                backend,
+                seed: Some(200 + case as u64),
+                ..Options::default()
+            };
+            let result = qvd::run::<f64>(&circuit, shots, &options).unwrap();
+            for key in result.counts.keys() {
+                assert!(
+                    exact.get(key).is_some_and(|&p| p > 1e-12),
+                    "case {case} {backend:?}: impossible outcome {key}"
+                );
+            }
+            for (key, &p) in &exact {
+                let observed = *result.counts.get(key).unwrap_or(&0) as f64 / shots as f64;
+                // Rounding can put a certain outcome just above 1.
+                let p = p.min(1.0);
+                let sigma = (p * (1.0 - p) / shots as f64).sqrt();
+                assert!(
+                    (observed - p).abs() <= 5.0 * sigma + 1e-9,
+                    "case {case} {backend:?} {key}: observed {observed}, exact {p}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn feedback_teleports_a_state() {
+    // Teleport each of the six Pauli eigenstates from qubit 0 to qubit 2
+    // with measurements and feedback (X from the Bell measurement's Z
+    // result, Z from its X result); measured in its own basis, qubit 2
+    // then gives the same result in every shot, on every backend that
+    // runs feedback and in the single-tableau path.
+    use qvd::Pauli;
+    for (prepare, unprepare, label) in [
+        (vec![], vec![], "|0>"),
+        (vec![Gate::X], vec![Gate::X], "|1>"),
+        (vec![Gate::H], vec![Gate::H], "|+>"),
+        (vec![Gate::X, Gate::H], vec![Gate::H, Gate::X], "|->"),
+        (vec![Gate::H, Gate::S], vec![Gate::Sdg, Gate::H], "|+i>"),
+        (
+            vec![Gate::X, Gate::H, Gate::S],
+            vec![Gate::Sdg, Gate::H, Gate::X],
+            "|-i>",
+        ),
+    ] {
+        let mut c = Circuit::new(3);
+        for g in &prepare {
+            c.gate(g.clone(), &[0]);
+        }
+        c.h(1).cx(1, 2).cx(0, 1).h(0);
+        c.measure(0, 0).measure(1, 1);
+        c.feedback(Pauli::X, 2, 1).feedback(Pauli::Z, 2, 0);
+        for g in &unprepare {
+            c.gate(g.clone(), &[2]);
+        }
+        c.measure(2, 2);
+        for backend in [Backend::Stabilizer, Backend::StateVector] {
+            let options = Options {
+                backend,
+                seed: Some(5),
+                ..Options::default()
+            };
+            let result = qvd::run::<f64>(&c, 2000, &options).unwrap();
+            // Bits 0 and 1 are random; bit 2 (the leftmost) is always 0.
+            assert_eq!(result.counts.len(), 4, "{label} {backend:?}");
+            assert!(
+                result.counts.keys().all(|k| k.starts_with('0')),
+                "{label} {backend:?}: {:?}",
+                result.counts
+            );
+        }
+        for seed in 0..20 {
+            let tableau = Tableau::from_circuit(&c, &mut common::rng(seed)).unwrap();
+            // After the last measurement qubit 2 is |0>: Z_2 is a stabilizer.
+            let z = PauliString::parse("IIZ").unwrap();
+            assert_eq!(tableau.expectation(&z), 1, "{label} seed {seed}");
+        }
+    }
+}
+
+#[test]
+fn feedback_runs_only_where_supported() {
+    let mut c = Circuit::new(2);
+    c.h(0)
+        .t(0)
+        .measure(0, 0)
+        .feedback(qvd::Pauli::X, 1, 0)
+        .measure(1, 1);
+    for backend in [Backend::Mps, Backend::NearClifford] {
+        let options = Options {
+            backend,
+            ..Options::default()
+        };
+        let error = qvd::run::<f64>(&c, 10, &options).unwrap_err();
+        assert!(error.to_string().contains("classical feedback"), "{error}");
+    }
+    // Auto takes the state vector for this non-Clifford circuit, and the
+    // stabilizer backend for a Clifford one.
+    let result = qvd::run::<f64>(&c, 1000, &Options::default()).unwrap();
+    assert_eq!(result.stats.backend, Some(Backend::StateVector));
+    assert!(result.counts.keys().all(|k| k == "00" || k == "11"));
+    let mut clifford = c.clone();
+    clifford.instructions.remove(1);
+    let result = qvd::run::<f64>(&clifford, 1000, &Options::default()).unwrap();
+    assert_eq!(result.stats.backend, Some(Backend::Stabilizer));
+    assert!(result.counts.keys().all(|k| k == "00" || k == "11"));
+}
