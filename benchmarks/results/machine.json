@@ -84,5 +84,18 @@
       "stim": "1.16.0"
     },
     "notes": "noisy_nearclifford*.csv by benchmarks/bench_noisy_nearclifford.py (qevedo-simulator 0.1.8 against clifft 0.13.0); examples_before_after*.csv (qevedo-simulator 0.1.5, the same Rust core as 0.1.6, against the build released as 0.1.8) by benchmarks/compare_examples.py, 9 rounds and 25 for the recheck."
+  },
+  "dynamic_machine": {
+    "date": "2026-11-28",
+    "cpu": "Intel Xeon @ 2.10 GHz cloud virtual machine, 4 vCPUs (AVX2, FMA, AVX-512)",
+    "memory": "15 GB",
+    "os": "Linux 6.18",
+    "rustc": "1.100.1",
+    "python_packages": {
+      "qiskit": "2.6.0",
+      "qiskit-aer": "0.18.4",
+      "numpy": "2.5.3"
+    },
+    "notes": "dynamic.csv by benchmarks/bench_dynamic.py: the same QuantumCircuit through QevedoSimulator().run and AerSimulator().run (defaults: Qevedo auto, Aer automatic, both on all 4 vCPUs), no transpiling, best of 3, including conversion; every result checked against the circuit's invariant (check column). qevedo-simulator 0.1.18 (the build released as 0.1.18)."
   }
 }

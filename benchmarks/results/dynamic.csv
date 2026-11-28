@@ -1,0 +1,25 @@
+simulator,case,qubits,if_tests,shots,seconds,method,check,version
+qvd,teleport 50,50,49,1000,0.0029,stabilizer,pass,0.1.18
+qiskit-aer,teleport 50,50,49,1000,0.0821,stabilizer,pass,0.18.4
+qvd,teleport 50,50,49,10000,0.0124,stabilizer,pass,0.1.18
+qiskit-aer,teleport 50,50,49,10000,0.5233,stabilizer,pass,0.18.4
+qvd,teleport 200,200,199,1000,0.0103,stabilizer,pass,0.1.18
+qiskit-aer,teleport 200,200,199,1000,0.5558,stabilizer,pass,0.18.4
+qvd,teleport 200,200,199,10000,0.0277,stabilizer,pass,0.1.18
+qiskit-aer,teleport 200,200,199,10000,4.0318,stabilizer,pass,0.18.4
+qvd,ghz 25 (49 qubits),49,300,1000,0.0077,stabilizer,pass,0.1.18
+qiskit-aer,ghz 25 (49 qubits),49,300,1000,0.1855,stabilizer,pass,0.18.4
+qvd,ghz 25 (49 qubits),49,300,10000,0.0166,stabilizer,pass,0.1.18
+qiskit-aer,ghz 25 (49 qubits),49,300,10000,1.1935,stabilizer,pass,0.18.4
+qvd,ghz 100 (199 qubits),199,4950,1000,0.1011,stabilizer,pass,0.1.18
+qiskit-aer,ghz 100 (199 qubits),199,4950,1000,4.6318,stabilizer,pass,0.18.4
+qvd,ghz 100 (199 qubits),199,4950,10000,0.1185,stabilizer,pass,0.1.18
+qiskit-aer,ghz 100 (199 qubits),199,4950,10000,28.1479,stabilizer,pass,0.18.4
+qvd,"repetition d=25, 10 rounds",49,240,1000,0.0093,stabilizer,pass,0.1.18
+qiskit-aer,"repetition d=25, 10 rounds",49,240,1000,0.3804,stabilizer,pass,0.18.4
+qvd,"repetition d=25, 10 rounds",49,240,10000,0.0256,stabilizer,pass,0.1.18
+qiskit-aer,"repetition d=25, 10 rounds",49,240,10000,2.4462,stabilizer,pass,0.18.4
+qvd,"repetition d=50, 20 rounds",99,980,1000,0.0393,stabilizer,pass,0.1.18
+qiskit-aer,"repetition d=50, 20 rounds",99,980,1000,2.2933,stabilizer,pass,0.18.4
+qvd,"repetition d=50, 20 rounds",99,980,10000,0.1194,stabilizer,pass,0.1.18
+qiskit-aer,"repetition d=50, 20 rounds",99,980,10000,19.6128,stabilizer,pass,0.18.4

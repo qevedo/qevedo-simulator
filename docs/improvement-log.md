@@ -7,6 +7,84 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-28 — Qiskit `if_test` and OpenQASM `if` as classical feedback (0.1.18)
+
+**What.**
+- `qevedo.simulator.qiskit` (`_append_if`, `_condition_bit`,
+  `_pauli_body`): an `IfElseOp` on one classical bit or one-bit register,
+  with or without `else`, whose bodies apply only one-qubit gates whose
+  matrix is a Pauli up to a phase (so `x`, `y`, `z`, `id`, and a
+  transpiler's `rx(pi)` or `u(pi, 0, pi)`), becomes `Circuit.feedback`.
+  Conditions: `(clbit, value)`, `(register, value)`, `expr.lift`,
+  `expr.logic_not` / `bit_not`, `expr.equal` / `not_equal` against 0, 1
+  or a bool, and casts. The body taken on 0 is applied unconditionally,
+  then the product of both bodies on each qubit as feedback on the bit:
+  the Paulis multiply up to a phase conditioned on a classical bit, which
+  is unobservable. `QevedoSimulator`'s target now has `if_else`, so
+  `transpile` keeps the blocks.
+- `qasm.rs` (`Parser::conditional`, `condition`, `pauli_body`): the same
+  for OpenQASM 3's `if (c[k]) x q;`, `if (!c[k]) { ... } else ...`,
+  `== 0/1`, `!= true/false`, and OpenQASM 2's `if (c == 1)` on a one-bit
+  register, as Qiskit's `qasm2`/`qasm3` exporters write them; bodies may
+  broadcast (`x q;`) and call user gates that expand to Paulis. Other
+  `if`s are rejected with the line, the column and the reason (a
+  register of several bits, a non-Pauli gate, `measure` in the body).
+- Docs: README (a dynamic-circuits section and table), python/README,
+  DESIGN.md (the rewrite next to the feedback frames), benchmarks README.
+- `benchmarks/bench_dynamic.py` and `results/dynamic.csv`.
+
+**Why.** Next item 1. Dynamic circuits (mid-circuit measurement and
+feed-forward) are what IBM's current hardware and tutorials push, and
+almost every Clifford one corrects with Paulis: teleportation, resets
+by measurement, the constant-depth GHZ and long-range CNOT preparations,
+syndrome rounds. Before this change the Qiskit layer and the QASM reader
+rejected every one of them, although `Instruction::Feedback` (0.1.17)
+already samples them exactly at Stim's speed. A small, exact change that
+moves a whole class of Qiskit workloads from "fails" to "far faster
+than Aer"; the other Next items speed up paths that already work.
+
+**Measured.**
+- Correctness: `conditional_programs_match_their_literal_meaning` (60
+  random OpenQASM 3 programs of Clifford gates, mid-circuit measurements
+  and `if`s in every form) gives the exact distribution of the `if`s
+  applied as written, branch by branch, to 1e-9, and 15 of them sample
+  within 5σ on the stabilizer and state-vector backends;
+  `conditional_paulis_become_feedback` pins the instructions;
+  teleportation of |+i> reads 0 on the stabilizer backend. Python: 30
+  random Qiskit dynamic circuits (registers, every condition form, `else`)
+  within total variation 0.02 of a literal `Statevector` branch walk on
+  the stabilizer backend and 0.05 on the state vector; six more through
+  `transpile(optimization_level=3)`, `qasm3.dumps` read back, and
+  `QevedoSampler`; teleportation through `transpile`; a 200-qubit GHZ reset
+  by feedback. Mutations (polarity, the unconditional 0-body, `logic_not`,
+  which body the condition selects) each fail tests.
+- Speed (`bench_dynamic.py`, 4-vCPU VM, `backend.run` on the same
+  circuit, defaults, best of 3, every result checked):
+
+  | Circuit | Qubits | Shots | Qevedo | Aer 0.18.4 | Aer / Qevedo |
+  |---|---|---|---|---|---|
+  | teleport 50 | 50 | 1,000 / 10,000 | 0.0029 / 0.0124 s | 0.082 / 0.523 s | 28× / 42× |
+  | teleport 200 | 200 | 1,000 / 10,000 | 0.0103 / 0.0277 s | 0.556 / 4.03 s | 54× / 146× |
+  | ghz 25 | 49 | 1,000 / 10,000 | 0.0077 / 0.0166 s | 0.185 / 1.19 s | 24× / 72× |
+  | ghz 100 | 199 | 1,000 / 10,000 | 0.101 / 0.119 s | 4.63 / 28.1 s | 46× / 238× |
+  | repetition d=25, 10 rounds | 49 | 1,000 / 10,000 | 0.0093 / 0.0256 s | 0.380 / 2.45 s | 41× / 96× |
+  | repetition d=50, 20 rounds | 99 | 1,000 / 10,000 | 0.0393 / 0.119 s | 2.29 / 19.6 s | 58× / 164× |
+
+- No regression: the six example binaries' `.text` is byte-identical to
+  0.1.17's at the same version; `from_qiskit` (one more name test per
+  instruction) on QV 28 (4341 operations) and a 500-qubit GHZ: medians
+  1.007 and 1.021 of the old converter over 40 interleaved rounds.
+
+**Learned.** Writing an `if`/`else` of Paulis as "0-body always, product
+on 1" makes every form (negations, `== 0`, `else`) one rule, and the
+phase argument (a phase conditioned on a measured bit is unobservable) is
+what makes products of Paulis safe. A literal branch-walking interpreter
+in the test, independent of the rewrite, catches polarity mistakes that a
+Stim-style comparison would not exercise.
+
+**Next.** XOR conditions (`expr.bit_xor`) as one feedback per bit; Aer
+noise models on Clifford circuits; Cirq and PennyLane devices.
+
 ## 2026-11-26 — Classical feedback: `CX rec[-1] q` in the stabilizer sampler and the Stim reader (0.1.17)
 
 **What.**

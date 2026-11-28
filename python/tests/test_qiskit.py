@@ -8,7 +8,9 @@ import pytest
 qiskit = pytest.importorskip("qiskit")
 
 from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister, transpile  # noqa: E402
-from qiskit.circuit import Parameter  # noqa: E402
+from qiskit import qasm3  # noqa: E402
+from qiskit.circuit import Clbit, Parameter  # noqa: E402
+from qiskit.circuit.classical import expr  # noqa: E402
 from qiskit.circuit.library import (  # noqa: E402
     MCXGate,
     PauliEvolutionGate,
@@ -101,9 +103,21 @@ def test_rejects_unbound_parameters_and_control_flow():
     qc.rx(Parameter("theta"), 0)
     with pytest.raises(ValueError, match="unbound parameters"):
         from_qiskit(qc)
+    # `if_test` with Pauli bodies is feedback (below); other bodies, other
+    # conditions and other control flow are rejected.
     qc = QuantumCircuit(1, 1)
     qc.measure(0, 0)
     with qc.if_test((qc.clbits[0], 1)):
+        qc.h(0)
+    with pytest.raises(ValueError, match="`h` inside `if_test`"):
+        from_qiskit(qc)
+    qc = QuantumCircuit(1, 2)
+    with qc.if_test((qc.cregs[0], 3)):
+        qc.x(0)
+    with pytest.raises(ValueError, match="one classical bit"):
+        from_qiskit(qc)
+    qc = QuantumCircuit(1, 1)
+    with qc.for_loop(range(2)):
         qc.x(0)
     with pytest.raises(ValueError, match="control flow"):
         from_qiskit(qc)
@@ -293,3 +307,185 @@ def test_core_functions_accept_qiskit_circuits():
     assert expectation(qc, "ZZI").value == pytest.approx(1.0)
     measured = qc.measure_all(inplace=False)
     assert set(run(measured, shots=200, seed=1).counts) == {"000", "111"}
+
+
+def literal_distribution(qc):
+    """The exact distribution of a dynamic circuit's classical bits,
+    branching on every measurement and evaluating each ``if_test`` as
+    written: its condition on the bits so far, then the chosen body."""
+    out = {}
+
+    def evaluate(condition, bits):
+        def bit_value(target):
+            if isinstance(target, Clbit):
+                return int(bits[qc.find_bit(target).index])
+            return sum(int(bits[qc.find_bit(c).index]) << i for i, c in enumerate(target))
+
+        def ev(e):
+            if isinstance(e, expr.Var):
+                return bit_value(e.var)
+            if isinstance(e, expr.Value):
+                return int(e.value)
+            if isinstance(e, expr.Cast):
+                return ev(e.operand)
+            if isinstance(e, expr.Unary):
+                return int(not ev(e.operand))
+            assert isinstance(e, expr.Binary)
+            equal = ev(e.left) == ev(e.right)
+            return int(equal if e.op == expr.Binary.Op.EQUAL else not equal)
+
+        if isinstance(condition, tuple):
+            return bit_value(condition[0]) == int(condition[1])
+        return bool(ev(condition))
+
+    def walk(data, state, bits, weight):
+        for i, instruction in enumerate(data):
+            op = instruction.operation
+            qargs = [qc.find_bit(q).index for q in instruction.qubits]
+            if op.name == "measure":
+                c = qc.find_bit(instruction.clbits[0]).index
+                for outcome in (0, 1):
+                    p = state.probabilities([qargs[0]])[outcome]
+                    if p < 1e-12:
+                        continue
+                    projector = np.diag([1 - outcome, outcome])
+                    branch = state.evolve(projector, [qargs[0]]) / math.sqrt(p)
+                    walk(data[i + 1 :], branch, bits[:c] + (bool(outcome),) + bits[c + 1 :], weight * p)
+                return
+            if op.name == "if_else":
+                taken = evaluate(op.condition, bits)
+                block = op.blocks[0] if taken else (op.blocks[1] if len(op.blocks) > 1 else None)
+                if block is not None:
+                    state = state.evolve(block, qargs)
+            elif op.name != "barrier":
+                state = state.evolve(op, qargs)
+        key = "".join("1" if b else "0" for b in reversed(bits))
+        out[key] = out.get(key, 0.0) + weight
+
+    walk(list(qc.data), Statevector.from_label("0" * qc.num_qubits), (False,) * qc.num_clbits, 1.0)
+    return out
+
+
+def random_dynamic_circuit(n, rng):
+    """Clifford gates, mid-circuit measurements and ``if_test``s with Pauli
+    bodies (some with ``else``), conditions in every form Qiskit writes."""
+    qr = QuantumRegister(n, "q")
+    flags = ClassicalRegister(1, "flag")
+    c = ClassicalRegister(2, "c")
+    qc = QuantumCircuit(qr, c, flags)
+    clbits = list(c) + list(flags)
+    paulis = ["x", "y", "z", "id"]
+    for _ in range(int(rng.integers(8, 18))):
+        kind = int(rng.integers(0, 10))
+        if kind <= 3:
+            getattr(qc, str(rng.choice(["h", "s", "sdg", "sx"])))(int(rng.integers(n)))
+        elif kind <= 5 and n > 1:
+            a, b = (int(x) for x in rng.choice(n, 2, replace=False))
+            getattr(qc, str(rng.choice(["cx", "cz"])))(a, b)
+        elif kind <= 7:
+            qc.measure(int(rng.integers(n)), clbits[int(rng.integers(3))])
+        else:
+            bit = clbits[int(rng.integers(3))]
+            form = int(rng.integers(0, 6))
+            if form == 0:
+                condition = (bit, int(rng.integers(2)))
+            elif form == 1:
+                condition = (flags, int(rng.integers(2)))
+            elif form == 2:
+                condition = expr.lift(bit)
+            elif form == 3:
+                condition = expr.logic_not(bit)
+            elif form == 4:
+                condition = expr.equal(flags, int(rng.integers(2)))
+            else:
+                condition = expr.not_equal(bit, bool(rng.integers(2)))
+
+            def body():
+                for _ in range(int(rng.integers(1, 4))):
+                    getattr(qc, str(rng.choice(paulis)))(int(rng.integers(n)))
+
+            if rng.random() < 0.5:
+                with qc.if_test(condition) as else_:
+                    body()
+                with else_:
+                    body()
+            else:
+                with qc.if_test(condition):
+                    body()
+    for q in range(n):
+        qc.measure(q, clbits[q % 3])
+    return qc
+
+
+def test_dynamic_circuits_with_pauli_feedback_match_their_meaning():
+    rng = np.random.default_rng(11)
+    backend = QevedoSimulator()
+    for case in range(30):
+        qc = random_dynamic_circuit(1 + case % 4, rng)
+        exact = literal_distribution(qc)
+        result = backend.run(qc, shots=20_000, seed_simulator=case).result()
+        assert result.results[0].metadata["method"] == "stabilizer"
+        counts = {k.replace(" ", ""): v for k, v in result.get_counts().items()}
+        assert set(counts) <= {k for k, p in exact.items() if p > 1e-12}, case
+        assert total_variation(counts, exact) < 0.02, case
+        # The same through the state vector, shot by shot.
+        counts = backend.run(qc, shots=4000, seed_simulator=case, method="statevector").result().get_counts()
+        counts = {k.replace(" ", ""): v for k, v in counts.items()}
+        assert total_variation(counts, exact) < 0.05, case
+
+
+def test_teleportation_and_reset_by_feedback():
+    # Teleport |+i>, undo its preparation: the target reads 0 every time.
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.s(0)
+    qc.h(1)
+    qc.cx(1, 2)
+    qc.cx(0, 1)
+    qc.h(0)
+    qc.measure(0, 0)
+    qc.measure(1, 1)
+    with qc.if_test((qc.clbits[1], 1)):
+        qc.x(2)
+    with qc.if_test((qc.clbits[0], 1)):
+        qc.z(2)
+    qc.sdg(2)
+    qc.h(2)
+    qc.measure(2, 2)
+    backend = QevedoSimulator()
+    counts = backend.run(transpile(qc, backend), shots=2000, seed_simulator=1).result().get_counts()
+    assert len(counts) == 4 and all(k[0] == "0" for k in counts)
+    # A reset by measurement and feedback, on 200 qubits of a GHZ state.
+    n = 200
+    qc = QuantumCircuit(n, n + 1)
+    qc.h(0)
+    for q in range(n - 1):
+        qc.cx(q, q + 1)
+    for q in range(n):
+        qc.measure(q, q)
+        with qc.if_test((qc.clbits[q], 1)):
+            qc.x(q)
+    qc.measure(n - 1, n)
+    out = backend.run(qc, shots=1000, seed_simulator=2).result()
+    assert out.results[0].metadata["method"] == "stabilizer"
+    counts = out.get_counts()
+    assert set(counts) == {"0" + "0" * n, "0" + "1" * n}
+
+
+def test_feedback_through_transpile_sampler_and_openqasm_3():
+    rng = np.random.default_rng(5)
+    backend = QevedoSimulator()
+    for case in range(6):
+        qc = random_dynamic_circuit(3, rng)
+        exact = literal_distribution(qc)
+        compiled = transpile(qc, backend, optimization_level=3, seed_transpiler=case)
+        counts = backend.run(compiled, shots=20_000, seed_simulator=case).result().get_counts()
+        assert total_variation({k.replace(" ", ""): v for k, v in counts.items()}, exact) < 0.02, case
+        # Qiskit's OpenQASM 3 export, read by the simulator's own parser.
+        text = qasm3.dumps(qc)
+        counts = run(text, 20_000, seed=case).counts
+        assert total_variation(counts, exact) < 0.02, (case, text)
+        # The sampler, register by register.
+        result = QevedoSampler(seed=case).run([qc], shots=20_000).result()[0]
+        joined = result.join_data().get_counts()
+        assert total_variation(joined, exact) < 0.02, case

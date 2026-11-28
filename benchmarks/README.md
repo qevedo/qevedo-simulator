@@ -16,6 +16,7 @@ benchmarks/
 │   ├── output.csv              records and detection events into NumPy: Qevedo vs Stim
 │   ├── output_before_after.csv the same, two Qevedo builds interleaved (0.1.3 vs 0.1.4)
 │   ├── mpp*.csv                MPP toric-code memory with correlated errors: Qevedo vs Stim
+│   ├── dynamic.csv             Qiskit dynamic circuits (`if_test` feed-forward): Qevedo vs Qiskit Aer
 │   ├── examples_before_after*.csv the Rust examples, two builds interleaved (0.1.10 vs 0.1.11; `_recheck` 0.1.13 vs 0.1.14 on the binaries that changed, `_shots_recheck` its 40-round rerun; `_feedback` 0.1.16 vs 0.1.17 and its recheck)
 │   ├── mps.csv                 matrix product states: Qevedo vs Qiskit Aer vs quimb
 │   ├── nearclifford.csv        Clifford+T circuits: Qevedo vs Qiskit Aer
@@ -31,6 +32,7 @@ benchmarks/
 ├── compare_builds.py           two builds interleaved -> output_before_after.csv
 ├── bench_mpp.py                MPP, PAULI_CHANNEL_2 and correlated errors -> mpp*.csv
 ├── compare_feedback_stim.py    random circuits with classical feedback against Stim (pass/fail)
+├── bench_dynamic.py            Qiskit dynamic circuits through backend.run against Aer -> dynamic.csv
 ├── compare_examples.py         the Rust examples of two builds interleaved -> examples_before_after.csv
 ├── compare_mps.py              times Qiskit Aer's and quimb's MPS simulators
 ├── compare_nearclifford.py     times Qiskit Aer's methods on Clifford+T circuits
@@ -159,6 +161,49 @@ the number of detection events in 10,000 noiseless shots.
 `mpp_long.csv` (`--long`): 4–12 million shots per simulator and case.
 Same 4-vCPU machine type as `detectors.csv`, measured on 2026-11-04 with
 stim 1.16.0 and pymatching 2.4.0.
+
+## Dynamic circuits (Qiskit `if_test`)
+
+`bench_dynamic.py` runs Clifford circuits with mid-circuit measurements and
+feed-forward through Qiskit's `backend.run` on `QevedoSimulator` and on
+`AerSimulator`, with each one's defaults: Qevedo turns the `if_test` blocks
+(Pauli corrections) into classical feedback and samples them on its
+stabilizer backend from one reference shot; Aer's automatic method picks
+its stabilizer method and simulates every shot again. Both get the same
+`QuantumCircuit` (no transpiling), all 4 vCPUs of the VM
+(`dynamic_machine` in `machine.json`, 2026-11-28), best of 3, with the
+conversion included. Every result is checked against what the circuit must
+give (the `check` column): the teleported state undone reads 0, the GHZ
+data qubits agree, every repetition-code round repeats the first one's
+syndrome.
+
+| Circuit | Qubits | `if_test`s | Shots | Qevedo | Qiskit Aer 0.18.4 | Aer / Qevedo |
+|---|---|---|---|---|---|---|
+| teleport 50 | 50 | 49 | 1,000 | 0.0029 s | 0.082 s | 28× |
+| teleport 50 | 50 | 49 | 10,000 | 0.0124 s | 0.523 s | 42× |
+| teleport 200 | 200 | 199 | 1,000 | 0.0103 s | 0.556 s | 54× |
+| teleport 200 | 200 | 199 | 10,000 | 0.0277 s | 4.032 s | 146× |
+| ghz 25 (49 qubits) | 49 | 300 | 1,000 | 0.0077 s | 0.185 s | 24× |
+| ghz 25 (49 qubits) | 49 | 300 | 10,000 | 0.0166 s | 1.194 s | 72× |
+| ghz 100 (199 qubits) | 199 | 4950 | 1,000 | 0.1011 s | 4.632 s | 46× |
+| ghz 100 (199 qubits) | 199 | 4950 | 10,000 | 0.1185 s | 28.148 s | 238× |
+| repetition d=25, 10 rounds | 49 | 240 | 1,000 | 0.0093 s | 0.380 s | 41× |
+| repetition d=25, 10 rounds | 49 | 240 | 10,000 | 0.0256 s | 2.446 s | 96× |
+| repetition d=50, 20 rounds | 99 | 980 | 1,000 | 0.0393 s | 2.293 s | 58× |
+| repetition d=50, 20 rounds | 99 | 980 | 10,000 | 0.1194 s | 19.613 s | 164× |
+
+The cases: *teleport n*, a state passed down a line of n qubits by one-bit
+teleportation (CZ, a measurement in X, an X correction per hop); *ghz k*,
+the constant-depth GHZ preparation of IBM's dynamic-circuit tutorials (k
+data qubits, k - 1 ancillas measuring neighbouring parities, then an X on
+each data qubit for every odd parity before it, one `if_test` per bit, so
+k(k - 1)/2 of them); *repetition d, r rounds*, ZZ checks on data qubits in
+|+>, the ancillas reset by measurement and an `if_test` X. Aer's time grows
+with the shots (about 2.8 ms a shot at 199 qubits); Qevedo's grows far
+less (1.2-4.3× for ten times the shots), so the gap is larger at 10,000
+shots. Conditions on several bits
+(`expr.bit_xor`, register values) and bodies with non-Pauli gates are not
+covered: Qevedo rejects them, while Aer runs them.
 
 ## Before and after a change (Rust examples)
 

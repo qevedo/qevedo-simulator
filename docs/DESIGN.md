@@ -338,6 +338,12 @@ skipped. Six details:
   flip on the copy as an X error, measures and resets it. Measuring the
   copy collapses `q` as measuring `q` would. An inverted record (`M !q`,
   `MPAD 1`) is the Pauli unconditionally, then the feedback.
+  OpenQASM's `if (c[k]) x q;` and Qiskit's `if_test` with Pauli bodies
+  arrive the same way: the body taken when the bit reads 0 is applied
+  unconditionally, then, when it reads 1, the product of both bodies on
+  each qubit (`qasm.rs` `Parser::conditional`, `qiskit.py`
+  `_append_if`). Paulis multiply up to a phase, and a phase conditioned
+  on a measured (or never written) bit is unobservable.
 - *Detection events are relative to the reference shot.* A detector fires
   when its measurements' parity differs from the noiseless circuit's, as in
   Stim. The sampler's reference shot is that noiseless run, so

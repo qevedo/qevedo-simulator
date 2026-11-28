@@ -29,7 +29,10 @@ Stim's generated distance-51 surface code come out 9.0× faster than from
 Stim's detector sampler (5.1× on one thread), and bit-packed at
 distance 101 in 13.6 s against Stim's 303 s; circuits that measure
 Pauli products directly (`MPP`) with correlated errors run too, 4.0–6.9×
-faster than Stim on a toric-code memory. Other circuits too large
+faster than Stim on a toric-code memory. Qiskit dynamic circuits whose
+feed-forward is Pauli corrections (`if_test` on one bit) run there too:
+24–238× faster than Qiskit Aer through `backend.run` on teleportation,
+constant-depth GHZ and repetition-code circuits of 49–200 qubits. Other circuits too large
 for a state vector run on a matrix product state backend, exact while the
 entanglement is low and approximate, with a fidelity estimate, beyond: it is
 1.6–14× faster than the faster of Qiskit Aer's and quimb's MPS simulators on
@@ -321,6 +324,31 @@ correlations and detector rates as Stim
 What is not there yet: sweep data (sweep bits always read 0), feedback on
 the MPS and near-Clifford backends, writing detectors in `to_stim`, and
 noise on the state-vector and MPS backends.
+
+### Dynamic circuits (Qiskit `if_test`, OpenQASM `if`)
+
+Qiskit's `if_test` on one classical bit (or one-bit register), with or
+without `else`, whose bodies apply only Pauli gates, and OpenQASM's
+`if (c[k]) x q;`, become the same feedback, so Clifford dynamic circuits
+(teleportation, resets by measurement, the constant-depth GHZ preparation
+of IBM's tutorials, repetition-code rounds) run on the stabilizer backend.
+Through Qiskit's `backend.run` on a 4-vCPU VM, against Qiskit Aer 0.18.4
+on the same circuit (`benchmarks/bench_dynamic.py`, every result checked
+against the circuit's invariant):
+
+| Circuit | Qubits | `if_test`s | Qevedo, 10,000 shots | Qiskit Aer | Aer / Qevedo (1,000 shots) |
+|---|---|---|---|---|---|
+| teleportation along 200 qubits | 200 | 199 | **0.028 s** | 4.03 s | 146× (54×) |
+| constant-depth GHZ, 100 data qubits | 199 | 4,950 | **0.12 s** | 28.1 s | 238× (46×) |
+| repetition code d = 50, 20 rounds, feedback resets | 99 | 980 | **0.12 s** | 19.6 s | 164× (58×) |
+
+All 12 cases are in the [benchmarks README](benchmarks/README.md#dynamic-circuits-qiskit-if_test)
+(24-238× in all). Aer simulates every shot again; Qevedo samples Pauli
+frames off one reference shot. Not covered: conditions on several bits
+(`expr.bit_xor`, register values), bodies with other gates, loops and
+`switch`; Qevedo rejects them with a clear error, Aer runs them. In the
+tests, 30 random Qiskit dynamic circuits (and 60 random OpenQASM 3
+programs) match the `if`s applied literally, branch by branch.
 
 ### Low-entanglement circuits (MPS)
 
@@ -622,7 +650,8 @@ evs = QevedoEstimator().run([(qc_unmeasured, ["ZZ", "XX"])]).result()[0].data.ev
 ```
 
 The backend and sampler choose the method as `run` does, and they keep
-mid-circuit measurements and resets. The estimator is exact on the state
+mid-circuit measurements, resets and `if_test` blocks of Pauli
+corrections (as feedback; see [dynamic circuits](#dynamic-circuits-qiskit-if_test-openqasm-if)). The estimator is exact on the state
 vector up to 24 qubits and uses Pauli propagation beyond that. Every
 standard Qiskit gate runs, and `run`, `statevector` and `expectation` also
 accept a `QuantumCircuit`. See [python/README.md](python/README.md#from-qiskit).
@@ -659,9 +688,17 @@ reads OpenQASM 2 and 3:
 - **Modifiers:** OpenQASM 3's `inv @`, `ctrl @`, `negctrl @` and integer
   `pow @`.
 
-Programs that need classical state (`if`, loops, variables) are rejected
-with the line and column of the statement. The Python tests check it
-against Qiskit on 40 random circuits exported both ways.
+- **Feed-forward:** `if` on one classical bit whose body (and `else` body)
+  applies only Pauli gates, as classical feedback: OpenQASM 3's
+  `if (c[0]) x q[1];`, `if (!c[1]) { z q[0]; y q[2]; } else x q[2];`,
+  `== 0`, `!= true`, and OpenQASM 2's `if (c == 1) x q[0];` on a one-bit
+  register, as Qiskit's exporters write them.
+
+Other programs that need classical state (`if` on several bits or with
+other gates, loops, variables) are rejected with the line and column of the
+statement. The Python tests check the reader against Qiskit on 40 random
+circuits exported both ways; the Rust tests check 60 random programs with
+`if`s against the same `if`s applied literally, branch by branch.
 
 `run` picks the backend: with the default `Backend::Auto`, circuits made only
 of Clifford gates (including rotations by multiples of π/2), measurements and

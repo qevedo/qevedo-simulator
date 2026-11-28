@@ -28,9 +28,21 @@ computes exact expectation values from the state vector up to
 
 Every standard Qiskit gate is accepted; those the simulator has no kernel for (``ecr``,
 ``iswap``, ``ryy``, ...) run as their exact matrices, and other gates through
-their definitions. Control flow, classical conditions and unbound parameters
-are rejected. Qiskit Aer's noise models are not read: noisy Clifford circuits
-can be built with the simulator's own ``Circuit`` (``depolarize1``, ...).
+their definitions. Dynamic circuits run when their classical control is
+feedback: an ``if_test`` (with or without ``else``) on one classical bit, or
+on a one-bit register, whose bodies apply only Pauli gates (the corrections of
+teleportation, measurement-based resets and IBM's feed-forward tutorials)
+becomes ``Circuit.feedback``, so a Clifford dynamic circuit stays on the
+stabilizer backend::
+
+    qc.measure(0, 0)
+    with qc.if_test((qc.clbits[0], 1)):
+        qc.x(1)
+
+Other control flow (loops, ``switch``, conditions on several bits, bodies
+with other gates) and unbound parameters are rejected. Qiskit Aer's noise
+models are not read: noisy Clifford circuits can be built with the
+simulator's own ``Circuit`` (``depolarize1``, ...).
 """
 
 from __future__ import annotations
@@ -40,7 +52,8 @@ import uuid
 from collections.abc import Iterable
 
 import numpy as np
-from qiskit.circuit import ControlFlowOp, QuantumCircuit
+from qiskit.circuit import ClassicalRegister, Clbit, ControlFlowOp, IfElseOp, QuantumCircuit
+from qiskit.circuit.classical import expr
 from qiskit.circuit.library import get_standard_gate_name_mapping
 from qiskit.primitives import BaseEstimatorV2, BaseSamplerV2
 from qiskit.primitives.containers import (
@@ -141,6 +154,8 @@ def _append(out: Circuit, circuit: QuantumCircuit, qubits: list[int], clbits: li
             phase += float(op.params[0])
         elif name == "box":
             phase += _append(out, op.blocks[0], qs, cs, propagation)
+        elif name == "if_else" and not propagation:
+            _append_if(out, op, qs, cindex)
         elif isinstance(op, ControlFlowOp):
             raise ValueError(f"control flow (`{name}`) is not supported by the Qevedo simulator")
         elif name in _NATIVE and not (propagation and name in _NOT_PROPAGATED):
@@ -152,6 +167,117 @@ def _append(out: Circuit, circuit: QuantumCircuit, qubits: list[int], clbits: li
         else:
             raise ValueError(f"the Qevedo simulator cannot run `{name}`: no matrix and no definition")
     return phase
+
+
+def _append_if(out: Circuit, op, qubits: list[int], cindex: dict) -> None:
+    """An ``if_test`` on one bit with Pauli bodies, as classical feedback.
+
+    ``Circuit.feedback`` applies a Pauli when a bit reads 1, so the body
+    taken on 0 is applied unconditionally and, when the bit reads 1, the
+    product of both bodies on each qubit (taking the 0-body back and putting
+    the 1-body on). Paulis multiply qubit by qubit up to a phase; that phase
+    is conditioned on a classical bit, which only a measurement (an
+    incoherent branch) or nothing (a fixed 0) wrote, so it is unobservable.
+    The OpenQASM reader (``qasm.rs``, ``Parser::conditional``) does the same.
+    """
+    clbit, wanted = _condition_bit(op.condition, cindex)
+    bodies = [_pauli_body(block, qubits) for block in op.blocks]
+    then, otherwise = bodies[0], bodies[1] if len(bodies) > 1 else {}
+    on_one, on_zero = (then, otherwise) if wanted else (otherwise, then)
+    for qubit, bits in on_zero.items():
+        if bits:
+            out.gate(_PAULI_NAMES[bits].lower(), [qubit], [])
+    for qubit in sorted(set(on_one) | set(on_zero)):
+        bits = on_one.get(qubit, 0) ^ on_zero.get(qubit, 0)
+        if bits:
+            out.feedback(_PAULI_NAMES[bits], qubit, clbit)
+
+
+# A Pauli by its bits (1: X, 2: Z), and the Paulis' matrices.
+_PAULI_NAMES = {1: "X", 2: "Z", 3: "Y"}
+_PAULI_MATRICES = {
+    0: np.eye(2),
+    1: np.array([[0, 1], [1, 0]]),
+    2: np.array([[1, 0], [0, -1]]),
+    3: np.array([[0, -1j], [1j, 0]]),
+}
+
+
+def _condition_bit(condition, cindex: dict) -> tuple[int, bool]:
+    """The classical bit an ``if_test`` reads, and the value of it that
+    selects the ``if`` body: ``(clbit, value)``, ``(one-bit register,
+    value)``, or an expression over one bit (``expr.lift(clbit)``,
+    ``expr.logic_not``, ``expr.bit_not``, ``expr.equal``,
+    ``expr.not_equal`` against 0, 1, true or false)."""
+    unsupported = ValueError(
+        f"the Qevedo simulator runs `if_test` on one classical bit (as feedback); not on {condition}"
+    )
+
+    def bit(target) -> int:
+        if isinstance(target, Clbit):
+            return cindex[target]
+        if isinstance(target, ClassicalRegister) and len(target) == 1:
+            return cindex[target[0]]
+        raise unsupported
+
+    def value(v) -> bool:
+        if isinstance(v, expr.Value):
+            v = v.value
+        if v is True or v is False or v in (0, 1):
+            return bool(v)
+        raise unsupported
+
+    def read(e) -> tuple[int, bool]:
+        """The bit, and the value of it for which `e` is true."""
+        if isinstance(e, expr.Var):
+            return bit(e.var), True
+        if isinstance(e, expr.Cast):
+            return read(e.operand)
+        if isinstance(e, expr.Unary) and e.op in (expr.Unary.Op.LOGIC_NOT, expr.Unary.Op.BIT_NOT):
+            clbit, wanted = read(e.operand)
+            return clbit, not wanted
+        if isinstance(e, expr.Binary) and e.op in (expr.Binary.Op.EQUAL, expr.Binary.Op.NOT_EQUAL):
+            left, right = (e.left, e.right) if isinstance(e.right, expr.Value) else (e.right, e.left)
+            clbit, wanted = read(left)
+            # `left == 1` is true where `left` is; `left == 0` where it isn't.
+            equal = e.op == expr.Binary.Op.EQUAL
+            return clbit, wanted if value(right) == equal else not wanted
+        raise unsupported
+
+    if isinstance(condition, tuple):
+        target, v = condition
+        return bit(target), value(v)
+    return read(condition)
+
+
+def _pauli_body(block: QuantumCircuit, qubits: list[int]) -> dict[int, int]:
+    """The Pauli (bits 1: X, 2: Z) each qubit gets from an ``if_test``
+    body that applies only Pauli gates, up to a phase. Any one-qubit gate
+    whose matrix is a Pauli times a phase counts (a transpiler may write
+    ``x`` as ``rx(pi)`` or ``u(pi, 0, pi)``)."""
+    index = {q: qubits[i] for i, q in enumerate(block.qubits)}
+    body: dict[int, int] = {}
+    for instruction in block.data:
+        op = instruction.operation
+        if op.name in ("barrier", "delay", "global_phase"):
+            continue
+        bits = None
+        if op.num_qubits == 1 and not isinstance(op, ControlFlowOp):
+            matrix = _matrix(op, 1)
+            if matrix is not None:
+                for k, pauli in _PAULI_MATRICES.items():
+                    # matrix = e^{i phi} pauli: |tr(pauli† matrix)| = 2.
+                    if abs(abs(np.trace(pauli.conj().T @ matrix)) - 2) < 1e-9:
+                        bits = k
+                        break
+        if bits is None:
+            raise ValueError(
+                f"`{op.name}` inside `if_test` is not supported: the Qevedo simulator runs `if_test` "
+                "bodies of Pauli gates (x, y, z, id) as classical feedback"
+            )
+        qubit = index[instruction.qubits[0]]
+        body[qubit] = body.get(qubit, 0) ^ bits
+    return body
 
 
 def _matrix(op, max_qubits: int) -> np.ndarray | None:
@@ -228,6 +354,9 @@ class QevedoSimulator(BackendV2):
         )
         names = [n for n in get_standard_gate_name_mapping() if n != "global_phase"]
         self._target = Target.from_configuration(names, num_qubits=num_qubits)
+        # `transpile` keeps `if_test` blocks only if the target has them; the
+        # ones that are feedback run, the others are rejected by `run`.
+        self._target.add_instruction(IfElseOp, name="if_else")
         self._target.description = "Qevedo ideal simulator"
         if options:
             self.set_options(**options)

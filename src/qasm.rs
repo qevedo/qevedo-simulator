@@ -11,15 +11,23 @@
 //! measure, reset and use barriers. OpenQASM 3's `inv @`, `ctrl @`,
 //! `negctrl @` and integer `pow @` modifiers are supported.
 //!
-//! Anything that needs classical state (`if`, loops, variables,
-//! subroutines, measurement results used in expressions) is rejected with
-//! the line and column of the statement.
+//! An `if` on one classical bit whose body (and `else` body) holds only
+//! Pauli gates is read as classical feedback ([`Instruction::Feedback`]):
+//! OpenQASM 3's `if (c[k]) x q[j];`, `if (!c[k]) { z q[0]; x q[1]; }`,
+//! `if (c[k] == 1) ... else ...`, and OpenQASM 2's `if (c == 1) x q[0];` on
+//! a one-bit register. This covers the corrections of teleportation,
+//! measurement-based resets and the feed-forward of IBM's dynamic circuits,
+//! and keeps them on the stabilizer backend.
+//!
+//! Anything else that needs classical state (`if` on several bits or with
+//! other gates, loops, variables, subroutines, measurement results used in
+//! expressions) is rejected with the line and column of the statement.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::f64::consts::{E, PI, TAU};
 use std::fmt;
 
-use crate::circuit::{Circuit, Gate, Instruction};
+use crate::circuit::{Circuit, Gate, Instruction, Pauli};
 use crate::matrix::{C64, Matrix};
 
 /// A syntax or semantic error, with its position (1-based).
@@ -216,6 +224,7 @@ fn lex(source: &str) -> Result<Vec<Token>, QasmError> {
                 "->" => Some("->"),
                 "**" => Some("**"),
                 "==" => Some("=="),
+                "!=" => Some("!="),
                 _ => None,
             };
             let (symbol, width) = match symbol {
@@ -376,8 +385,9 @@ struct Parser {
 }
 
 /// The statement keywords of OpenQASM 3 that need classical state.
+/// (`if` is read by [`Parser::conditional`] when its bodies are Paulis; a
+/// stray `else` is an error.)
 const UNSUPPORTED: &[&str] = &[
-    "if",
     "else",
     "for",
     "while",
@@ -537,6 +547,7 @@ impl Parser {
                 self.declare(word == "qubit", name, size, &at)?;
             }
             "gate" => self.definition()?,
+            "if" => self.conditional()?,
             "measure" => {
                 self.next();
                 let qubits = self.operand(true)?;
@@ -616,6 +627,187 @@ impl Parser {
             }
         }
         Ok(())
+    }
+
+    /// `if (condition) body` or `if (condition) body else body`, where the
+    /// condition tests one classical bit and each body is a gate call or a
+    /// `{ ... }` block of gate calls that expand to Pauli gates only.
+    ///
+    /// Classical feedback ([`Instruction::Feedback`]) applies a Pauli when a
+    /// bit reads 1, so the two bodies are rewritten as: the body for 0
+    /// unconditionally, then, when the bit reads 1, the product of both
+    /// bodies on each qubit (taking the 0-body back and the 1-body on).
+    /// Paulis multiply qubit by qubit up to a phase, and that phase is
+    /// conditioned on a classical bit, which only a measurement (an
+    /// incoherent branch) or nothing (a fixed 0) wrote: it is unobservable.
+    fn conditional(&mut self) -> Result<(), QasmError> {
+        let at = self.next();
+        self.expect("(")?;
+        let (clbit, wanted) = self.condition()?;
+        self.expect(")")?;
+        let then = self.pauli_body(&at)?;
+        let otherwise = if matches!(&self.peek().kind, Kind::Ident(w) if w == "else") {
+            self.next();
+            self.pauli_body(&at)?
+        } else {
+            BTreeMap::new()
+        };
+        let (on_one, on_zero) = if wanted {
+            (then, otherwise)
+        } else {
+            (otherwise, then)
+        };
+        for (&qubit, &pauli) in &on_zero {
+            if let Some(pauli) = pauli_of(pauli) {
+                self.program.instructions.push(Instruction::Gate {
+                    gate: pauli.gate(),
+                    qubits: vec![qubit],
+                });
+            }
+        }
+        let qubits: BTreeSet<usize> = on_one.keys().chain(on_zero.keys()).copied().collect();
+        for qubit in qubits {
+            let flip = on_one.get(&qubit).copied().unwrap_or(0)
+                ^ on_zero.get(&qubit).copied().unwrap_or(0);
+            if let Some(pauli) = pauli_of(flip) {
+                self.program.instructions.push(Instruction::Feedback {
+                    pauli,
+                    qubit,
+                    clbit,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The tested bit and the value that selects the first body:
+    /// `c[k]`, `!c[k]`, `c[k] == 1`, `c[k] != false`, or a one-bit
+    /// register's name in place of `c[k]` (OpenQASM 2's `if (c == 1)`).
+    fn condition(&mut self) -> Result<(usize, bool), QasmError> {
+        let mut negated = false;
+        while self.is_symbol("!") {
+            self.next();
+            negated = !negated;
+        }
+        let (name, at) = self.ident()?;
+        let Some(&(first, size)) = self.program.cregs.get(&name) else {
+            return self.error(
+                &at,
+                format!("unknown classical bit register `{name}` in a condition"),
+            );
+        };
+        let clbit = if self.is_symbol("[") {
+            self.next();
+            let index = self.integer()?;
+            self.expect("]")?;
+            if index >= size {
+                return self.error(
+                    &at,
+                    format!("index {index} is out of range for `{name}` of size {size}"),
+                );
+            }
+            first + index
+        } else if size == 1 {
+            first
+        } else {
+            return self.error(
+                &at,
+                format!("a condition on `{name}`, a register of {size} bits, is not supported: only one bit can be tested (`if ({name}[k])`)"),
+            );
+        };
+        let mut wanted = true;
+        if self.is_symbol("==") || self.is_symbol("!=") {
+            let equal = self.next().kind == Kind::Symbol("==");
+            let token = self.next();
+            let value = match &token.kind {
+                Kind::Number(v) if *v == 0.0 || *v == 1.0 => *v == 1.0,
+                Kind::Ident(w) if w == "true" || w == "false" => w == "true",
+                other => {
+                    return self.error(
+                        &token,
+                        format!(
+                            "a bit can only be compared with 0, 1, true or false, not {}",
+                            describe(other)
+                        ),
+                    );
+                }
+            };
+            wanted = value == equal;
+        }
+        Ok((clbit, wanted != negated))
+    }
+
+    /// One gate call, or a `{ ... }` block of them, as the Pauli each
+    /// qubit gets (bit 0: X, bit 1: Z, up to a phase).
+    fn pauli_body(&mut self, at: &Token) -> Result<BTreeMap<usize, u8>, QasmError> {
+        let block = self.is_symbol("{");
+        if block {
+            self.next();
+        }
+        let start = self.program.instructions.len();
+        loop {
+            if block && self.is_symbol("}") {
+                self.next();
+                break;
+            }
+            let token = self.peek().clone();
+            match &token.kind {
+                Kind::Ident(w) if w == "barrier" => {
+                    while !self.is_symbol(";") && self.peek().kind != Kind::End {
+                        self.next();
+                    }
+                    self.expect(";")?;
+                }
+                Kind::Ident(w)
+                    if matches!(w.as_str(), "measure" | "reset" | "if" | "gate")
+                        || UNSUPPORTED.contains(&w.as_str()) =>
+                {
+                    return self.error(&token, format!("`{w}` inside `if` is not supported: an `if` body can only apply Pauli gates (x, y, z, id)"));
+                }
+                Kind::Ident(_) => {
+                    let call = self.call()?;
+                    self.expect(";")?;
+                    let before = self.program.instructions.len();
+                    let name = call.name.clone();
+                    self.top_level_call(call)?;
+                    let paulis = self.program.instructions[before..].iter().all(|i| {
+                        matches!(
+                            i,
+                            Instruction::Gate {
+                                gate: Gate::I | Gate::X | Gate::Y | Gate::Z,
+                                ..
+                            }
+                        )
+                    });
+                    if !paulis {
+                        return self.error(&token, format!("`{name}` inside `if` is not supported: an `if` body can only apply Pauli gates (x, y, z, id), which run as classical feedback"));
+                    }
+                }
+                Kind::End => return self.error(at, "unterminated `if` block"),
+                other => {
+                    return self.error(
+                        &token,
+                        format!("expected a gate call, found {}", describe(other)),
+                    );
+                }
+            }
+            if !block {
+                break;
+            }
+        }
+        let mut body = BTreeMap::new();
+        for instruction in self.program.instructions.drain(start..) {
+            if let Instruction::Gate { gate, qubits } = instruction {
+                let bits = match gate {
+                    Gate::X => 1,
+                    Gate::Z => 2,
+                    Gate::Y => 3,
+                    _ => 0,
+                };
+                *body.entry(qubits[0]).or_insert(0) ^= bits;
+            }
+        }
+        Ok(body)
     }
 
     fn declare(
@@ -1156,6 +1348,16 @@ impl Parser {
                 format!("expected an expression, found {}", describe(&other)),
             ),
         }
+    }
+}
+
+/// The Pauli with these bits (bit 0: X, bit 1: Z), `None` for the identity.
+fn pauli_of(bits: u8) -> Option<Pauli> {
+    match bits {
+        1 => Some(Pauli::X),
+        2 => Some(Pauli::Z),
+        3 => Some(Pauli::Y),
+        _ => None,
     }
 }
 

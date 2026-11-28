@@ -152,8 +152,14 @@ evs = QevedoEstimator().run([(qc, ["ZZ", "XX"])]).result()[0].data.evs          
 - Every standard Qiskit gate runs. Gates without a kernel of their own (`ecr`,
   `iswap`, `ryy`, ...) run as their exact matrices, and others (QFT, MCX,
   `UnitaryGate`, `PauliEvolutionGate`, ...) through their definitions.
-  Control flow and unbound parameters are rejected. Aer noise models are not
-  read.
+  Unbound parameters are rejected. Aer noise models are not read.
+- Dynamic circuits run when their feed-forward is Pauli corrections:
+  `if_test` (with or without `else`) on one classical bit or one-bit register,
+  whose bodies apply only Pauli gates, becomes classical feedback, so a
+  Clifford dynamic circuit (teleportation, resets by measurement, IBM's
+  constant-depth GHZ) runs on the stabilizer backend. Other control flow
+  (loops, `switch`, conditions on several bits, other gates in the body) is
+  rejected.
 - `run`, `statevector` and `expectation` also take a `QuantumCircuit`
   directly. `statevector` keeps its global phase.
 
